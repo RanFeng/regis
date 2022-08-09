@@ -28,6 +28,7 @@ type SDB interface {
 	RangeKV(ch <-chan struct{}) chan DBKV
 	PutData(key string, val interface{}) int
 	GetData(key string) (interface{}, bool)
+	RemoveData(keys ...string) int
 	Size() int
 	TTLSize() int
 }

@@ -11,14 +11,6 @@ const (
 	expireDictSize = 1 << 10
 )
 
-type ReqType int // 获取 SingleDB 的 core 的请求类型
-
-const (
-	ReqWrite     ReqType = iota // 写请求
-	ReqFirstRead                // 首次读请求
-	ReqMissRead                 // 首次读miss，后续的读请求
-)
-
 type SDBRealFunc func(db *SingleDB, args []string) base.Reply
 
 func GetSDBReal(exec interface{}) SDBRealFunc {
@@ -51,42 +43,6 @@ type SingleDB struct {
 	// 也有一部分luck Key在这期间被删除了，对于这部分以负数计入luckCount中
 	// 对于更改的Key，不算luck Key
 	luckCount int
-}
-
-// GetDB 获取 SingleDB 各种状态下应该读写哪个core
-// 分为三种可能：
-// 写请求：  	mode == 0
-// 第一次读： mode == 1
-// 第二次读： mode == 2
-// 第二次读是指第一次读的时候miss了，所以需要有第二次读
-func (sdb *SingleDB) GetDB(mode ReqType) *core {
-	switch sdb.status {
-	case base.WorldNormal:
-		return sdb.db
-	case base.WorldFrozen:
-		if mode == 0 || mode == 1 {
-			return sdb.bgDB
-		} else if mode == 2 {
-			return sdb.db
-		}
-	case base.WorldMoving:
-		if mode == 1 {
-			return sdb.bgDB
-		} else if mode == 0 || mode == 2 {
-			return sdb.db
-		}
-	case base.WorldStopped:
-		return sdb.db
-	}
-	return sdb.db
-}
-
-func (sdb *SingleDB) GetOri() *core {
-	return sdb.db
-}
-
-func (sdb *SingleDB) GetBak() *core {
-	return sdb.bgDB
 }
 
 func (sdb *SingleDB) SetStatus(status base.WorldStatus) {
@@ -124,26 +80,31 @@ func (sdb *SingleDB) RangeKV(ch <-chan struct{}) chan base.DBKV {
 }
 
 func (sdb *SingleDB) PutData(key string, val interface{}) int {
+	luck := 0
 	switch sdb.status {
 	case base.WorldNormal:
 		return sdb.db.data.Put(key, val)
 	case base.WorldFrozen:
-		_, exists := sdb.db.data.Get(key)
-		change := sdb.bgDB.data.Put(key, val)
-		if !exists {
-			// TODO 此处可以计算size
-			return change
+		_, exists1 := sdb.db.data.Get(key)
+		v, exists2 := sdb.bgDB.data.Get(key)
+		_, valNull := v.(base.Null)
+		if (!exists1 && !exists2) || (exists2 && valNull) {
+			luck = 1
+			sdb.luckCount++
 		}
-		return 0
+		sdb.bgDB.data.Put(key, val)
+		return luck
 	case base.WorldMoving:
-		_, exists := sdb.bgDB.data.Get(key)
-		change := sdb.db.data.Put(key, val)
-		if !exists {
-			// TODO 此处可以计算size
-			return change
+		_, exists1 := sdb.db.data.Get(key)
+		v, exists2 := sdb.bgDB.data.Get(key)
+		_, valNull := v.(base.Null)
+		if (!exists1 && !exists2) || (exists2 && valNull) {
+			luck = 1
+			sdb.luckCount++
 		}
+		sdb.db.data.Put(key, val)
 		sdb.bgDB.data.Del(key)
-		return 0
+		return luck
 	case base.WorldStopped:
 		return sdb.bgDB.data.Put(key, val)
 	}
@@ -155,32 +116,73 @@ func (sdb *SingleDB) GetData(key string) (interface{}, bool) {
 	case base.WorldNormal:
 		return sdb.db.data.Get(key)
 	case base.WorldFrozen:
-		val, exists := sdb.bgDB.data.Get(key)
-		if !exists {
-			return sdb.db.data.Get(key)
+		w, exists1 := sdb.db.data.Get(key)
+		v, exists2 := sdb.bgDB.data.Get(key)
+		_, valNull := v.(base.Null)
+		if exists1 && !exists2 {
+			return w, true
+		} else if exists2 && !valNull {
+			return v, true
+		} else {
+			return nil, false
 		}
-		return val, exists
 	case base.WorldMoving:
-		val, exists := sdb.bgDB.data.Get(key)
-		if !exists {
-			return sdb.db.data.Get(key)
-		}
-		sdb.db.data.Put(key, val)
+		w, exists1 := sdb.db.data.Get(key)
+		v, exists2 := sdb.bgDB.data.Get(key)
+		_, valNull := v.(base.Null)
 		sdb.bgDB.data.Del(key)
+		if exists1 && !exists2 {
+			return w, true
+		} else if exists2 && !valNull {
+			sdb.db.data.Put(key, v)
+			return v, true
+		} else {
+			return nil, false
+		}
 	case base.WorldStopped:
 		return sdb.db.data.Get(key)
 	}
 	return sdb.db.data.Get(key)
 }
 
+func (sdb *SingleDB) RemoveData(keys ...string) int {
+	luck := 0
+	for _, key := range keys {
+		switch sdb.status {
+		case base.WorldNormal:
+			luck += sdb.db.data.Del(key)
+		case base.WorldFrozen:
+			_, exists1 := sdb.db.data.Get(key)
+			v, exists2 := sdb.bgDB.data.Get(key)
+			_, valNull := v.(base.Null)
+			if (exists1 && !exists2) || (exists2 && !valNull) {
+				luck++
+				sdb.bgDB.data.Put(key, base.Null{})
+			}
+		case base.WorldMoving:
+			_, exists1 := sdb.db.data.Get(key)
+			v, exists2 := sdb.bgDB.data.Get(key)
+			_, valNull := v.(base.Null)
+			if (exists1 && !exists2) || (exists2 && !valNull) {
+				luck++
+			}
+			sdb.db.data.Del(key)
+			sdb.bgDB.data.Del(key)
+		case base.WorldStopped:
+			luck += sdb.bgDB.data.Put(key, base.Null{})
+		}
+	}
+	sdb.luckCount -= luck
+	return luck
+}
+
 func (sdb *SingleDB) Size() int {
-	// TODO 在 bgsave期间，对bgDB写了新的key，这时候数据不准确
-	return sdb.GetDB(ReqFirstRead).data.Len()
+	return sdb.db.data.Len()
 }
 
 func (sdb *SingleDB) TTLSize() int {
 	// TODO 在 bgsave期间，对bgDB写了新的key，这时候数据不准确
-	return sdb.GetDB(ReqFirstRead).expire.Len()
+	return sdb.db.expire.Len()
 }
 
 func newSDB() *SingleDB {

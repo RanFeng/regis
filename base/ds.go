@@ -23,4 +23,7 @@ type List LList
 type Hash Dict
 type Set interface{}
 type Zset interface{}
-type Null struct{} // 当需要删除某个key，但是由于bgsave等命令不能删除的时候，对该key置位为Null
+
+// Null 当需要删除某个key，但是由于bgsave等命令不能删除的时候，在bgDB中对该key置位为Null
+// 注意！该值永远不可能存在于 db 中，只能存在于 bgDB 中！！！
+type Null struct{}
