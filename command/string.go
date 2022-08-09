@@ -8,7 +8,7 @@ import (
 )
 
 func execSet(db *database.SingleDB, args []string) base.Reply {
-	_ = db.PutData(args[1], args[2])
+	_ = db.PutData(args[1], base.String(args[2]))
 	return redis.OkReply
 }
 
@@ -25,7 +25,7 @@ func execMSet(db *database.SingleDB, args []string) base.Reply {
 		return redis.ArgNumErrReply(args[0])
 	}
 	for i := 1; i+1 < len(args); i += 2 {
-		_ = db.PutData(args[i], args[i+1])
+		_ = db.PutData(args[i], base.String(args[i+1]))
 	}
 	return redis.OkReply
 }

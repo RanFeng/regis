@@ -19,6 +19,8 @@ func mdbInit() {
 func serverInit() {
 	base.RegCmdInfo("ping", -1, base.CmdLevelServer, tcp.Ping)
 	base.RegCmdInfo("select", 2, base.CmdLevelServer, tcp.Select)
+	base.RegCmdInfo("save", 1, base.CmdLevelServer, tcp.Save)
+	base.RegCmdInfo("bgsave", 1, base.CmdLevelServer, tcp.BGSave)
 	base.RegCmdInfo("publish", 3, base.CmdLevelServer, tcp.Publish)
 	base.RegCmdInfo("subscribe", -2, base.CmdLevelServer, tcp.Subscribe)
 	base.RegCmdInfo("unsubscribe", -2, base.CmdLevelServer, tcp.UnSubscribe)

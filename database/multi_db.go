@@ -11,7 +11,13 @@ const (
 )
 
 type MultiDB struct {
-	SDB []*SingleDB
+	// status
+	// 初始时， status = base.WorldNormal
+	// 当调用BGSave时， status = base.WorldFrozen，此时server不接受外界的新的BGSave
+	// 当调用Save时， status = base.WorldStopped，此时server不接受外界的新的请求
+	status base.WorldStatus
+
+	sDB []*SingleDB
 }
 
 func (md *MultiDB) Exec(cmd *base.Command) base.Reply {
@@ -23,31 +29,26 @@ func (md *MultiDB) Exec(cmd *base.Command) base.Reply {
 	return sdb.Exec(cmd)
 }
 
-func (md *MultiDB) RangeKV(ch <-chan struct{}) chan base.DBKV {
-	kvs := make(chan base.DBKV)
-	go func() {
-		defer func() {
-			close(kvs)
-		}()
-		for i := range md.SDB {
-			for kv := range md.SDB[i].RangeKV(ch) {
-				kv.Index = i
-				select {
-				case <-ch: // c被close或者传入信号时，都会触发，此时就要结束该协程
-					return
-				case kvs <- kv:
-				}
-			}
-		}
-	}()
-	return kvs
+func (md *MultiDB) SetStatus(status base.WorldStatus) {
+	md.status = status
+	for i := range md.sDB {
+		md.sDB[i].SetStatus(status)
+	}
 }
 
-func (md *MultiDB) GetSDB(i int) *SingleDB {
-	if i >= len(md.SDB) || i <= 0 {
-		return md.SDB[0]
+func (md *MultiDB) GetStatus() base.WorldStatus {
+	return md.status
+}
+
+func (md *MultiDB) GetSpaceNum() int {
+	return len(md.sDB)
+}
+
+func (md *MultiDB) GetSDB(i int) base.SDB {
+	if i >= len(md.sDB) || i <= 0 {
+		return md.sDB[0]
 	}
-	return md.SDB[i]
+	return md.sDB[i]
 }
 
 func NewMultiDB() *MultiDB {
@@ -55,12 +56,11 @@ func NewMultiDB() *MultiDB {
 		conf.Conf.Databases = DefaultSDBNum
 	}
 	db := &MultiDB{
-		SDB: make([]*SingleDB, conf.Conf.Databases),
+		sDB: make([]*SingleDB, conf.Conf.Databases),
 	}
 	for i := 0; i < conf.Conf.Databases; i++ {
 		sdb := newSDB()
-		sdb.index = i
-		db.SDB[i] = sdb
+		db.sDB[i] = sdb
 	}
 	return db
 }

@@ -85,3 +85,7 @@ func (dict *Dict) RangeKV(ch <-chan struct{}) chan base.DictKV {
 func (dict *Dict) Len() int {
 	return len(dict.m)
 }
+
+func (dict *Dict) Clear() {
+	dict.m = map[string]interface{}{}
+}

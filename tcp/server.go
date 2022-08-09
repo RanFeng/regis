@@ -19,17 +19,8 @@ type Server struct {
 	list      *ds.LinkedList      // 存储已连接的client
 	closeChan chan int64          // 用于监听conn的断连，close时就将client从list中删除se可连接的信号量+1
 
-	// freeze
-	// 初始时， freeze = base.WorldNormal
-	// 当调用BGSave时， freeze = base.WorldFrozen
-	// BGSave结束时， freeze = base.WorldMoving
-	// bgDB 里的数据完全转移到 db 中时，freeze = base.WorldNormal
-	freeze base.WorldStatus
 	// db 是服务端的主数据库
 	db base.DB
-	// freeze = base.WorldFrozen 时，读命令优先 bgDB，miss后再读 db，写命令直接写入 bgDB，
-	// freeze == base.WorldMoving 时，如果 bgDB 里有值，就蚂蚁搬家式地写入 db 中，在这段期间，不允许 BGSave
-	bgDB base.DB
 
 	workChan chan *base.Command // 用于给主协程输送命令的
 

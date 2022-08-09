@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"code/regis/base"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -27,6 +28,8 @@ func InterfaceToString(value interface{}) string {
 	switch v := value.(type) {
 	case string:
 		return v
+	case base.String:
+		return string(v)
 	case fmt.Stringer:
 		return v.String()
 	case fmt.GoStringer:

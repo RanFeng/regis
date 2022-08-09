@@ -1,6 +1,7 @@
 package file
 
 import (
+	"code/regis/base"
 	log "code/regis/lib"
 	"os"
 	"time"
@@ -58,17 +59,21 @@ func LoadRDB(fn string) [][]interface{} {
 	return query
 }
 
-func SaveRDB(fn string) {
-	//rdbFile, err := os.OpenFile(fn)
+func SaveRDB(db base.DB) error {
+	fn := "dump.rdb"
 	rdbFile, err := os.Create(fn)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer rdbFile.Close()
+	defer func() {
+		log.Error("get err %v", err)
+	}()
+
 	enc := encoder.NewEncoder(rdbFile)
 	err = enc.WriteHeader()
 	if err != nil {
-		panic(err)
+		return err
 	}
 	auxMap := map[string]string{
 		"redis-ver":    "6.2.5",
@@ -78,68 +83,77 @@ func SaveRDB(fn string) {
 	for k, v := range auxMap {
 		err = enc.WriteAux(k, v)
 		if err != nil {
-			panic(err)
+			return err
 		}
 	}
 
-	err = enc.WriteDBHeader(0, 5, 1)
-	if err != nil {
-		panic(err)
+	dbNum := db.GetSpaceNum()
+	ch := make(chan struct{})
+	for i := 0; i < dbNum; i++ {
+		sdb := db.GetSDB(i)
+		if sdb.Size() == 0 {
+			sdb.SetStatus(base.WorldMoving)
+			continue
+		}
+		err = enc.WriteDBHeader(uint(i), uint64(sdb.Size()), uint64(sdb.TTLSize()))
+		if err != nil {
+			return err
+		}
+		for kv := range sdb.RangeKV(ch) {
+			log.Info("write kvs %v %T", kv, kv.Val)
+			var ttlOp interface{}
+			if kv.TTL > 0 {
+				ttlOp = encoder.WithTTL(uint64(time.Now().Add(time.Duration(kv.TTL*int64(time.Millisecond))).Unix() * 1000))
+			}
+			switch v := kv.Val.(type) {
+			case base.String:
+				err = enc.WriteStringObject(kv.Key, []byte(v), ttlOp)
+			case base.List:
+				ch := make(chan struct{})
+				ret := make([][]byte, 0, v.Len())
+				for k := range v.Range(ch) {
+					ret = append(ret, k.([]byte))
+				}
+				close(ch)
+				err = enc.WriteListObject(kv.Key, ret, ttlOp)
+			case base.Hash:
+				ch := make(chan struct{})
+				ret := make(map[string][]byte, v.Len())
+				for hkv := range v.RangeKV(ch) {
+					ret[hkv.Key] = hkv.Val.([]byte)
+				}
+				close(ch)
+				err = enc.WriteHashMapObject(kv.Key, ret, ttlOp)
+			case base.Set:
+				// TODO
+				err = enc.WriteSetObject("set", [][]byte{
+					[]byte("123"),
+					[]byte("abc"),
+					[]byte("la la la"),
+				})
+			case base.Zset:
+				// TODO
+				err = enc.WriteZSetObject("list2", []*model.ZSetEntry{
+					{
+						Score:  1.234,
+						Member: "a",
+					},
+					{
+						Score:  2.71828,
+						Member: "b",
+					},
+				})
+			}
+			if err != nil {
+				return err
+			}
+		}
+		sdb.SetStatus(base.WorldMoving)
 	}
 
-	expirationMs := uint64(time.Now().Add(time.Hour*8).Unix() * 1000)
-	err = enc.WriteStringObject("hello", []byte("world"), encoder.WithTTL(expirationMs))
-	if err != nil {
-		panic(err)
-	}
-	err = enc.WriteListObject("list1", [][]byte{
-		[]byte("123"),
-		[]byte("abc"),
-		[]byte("la la la"),
-	})
-	if err != nil {
-		panic(err)
-	}
-	err = enc.WriteSetObject("set", [][]byte{
-		[]byte("123"),
-		[]byte("abc"),
-		[]byte("la la la"),
-	})
-	if err != nil {
-		panic(err)
-	}
-	err = enc.WriteHashMapObject("list3", map[string][]byte{
-		"1":  []byte("123"),
-		"a":  []byte("abc"),
-		"la": []byte("la la la"),
-	})
-	if err != nil {
-		panic(err)
-	}
-	err = enc.WriteZSetObject("list2", []*model.ZSetEntry{
-		{
-			Score:  1.234,
-			Member: "a",
-		},
-		{
-			Score:  2.71828,
-			Member: "b",
-		},
-	})
-	if err != nil {
-		panic(err)
-	}
-
-	err = enc.WriteDBHeader(1, 1, 0)
-	if err != nil {
-		panic(err)
-	}
-	err = enc.WriteStringObject("hello", []byte("world22222"), encoder.WithTTL(expirationMs))
-	if err != nil {
-		panic(err)
-	}
 	err = enc.WriteEnd()
 	if err != nil {
-		panic(err)
+		return err
 	}
+	return nil
 }

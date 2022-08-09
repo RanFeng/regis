@@ -4,6 +4,7 @@ import (
 	"code/regis/base"
 	"code/regis/conf"
 	"code/regis/ds"
+	"code/regis/file"
 	"code/regis/redis"
 	"strconv"
 )
@@ -40,6 +41,30 @@ func Select(server *Server, conn base.Conn, args []string) base.Reply {
 		return redis.ErrReply("ERR DB index is out of range")
 	}
 	conn.SetDBIndex(index)
+	return redis.OkReply
+}
+
+func Save(server *Server, conn base.Conn, args []string) base.Reply {
+	server.GetDB().SetStatus(base.WorldStopped)
+	defer server.GetDB().SetStatus(base.WorldNormal)
+
+	ch := make(chan struct{})
+	defer close(ch)
+
+	err := file.SaveRDB(server.GetDB())
+	if err != nil {
+		return redis.ErrReply("ERR in save")
+	}
+	return redis.OkReply
+}
+
+func BGSave(server *Server, conn base.Conn, args []string) base.Reply {
+	server.GetDB().SetStatus(base.WorldFrozen)
+
+	ch := make(chan struct{})
+	defer close(ch)
+
+	go file.SaveRDB(server.GetDB())
 	return redis.OkReply
 }
 

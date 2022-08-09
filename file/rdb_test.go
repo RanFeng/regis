@@ -7,5 +7,5 @@ func TestLoadRDB(t *testing.T) {
 }
 
 func TestSaveRDB(t *testing.T) {
-	SaveRDB("../dump.rdb")
+	//SaveRDB()
 }

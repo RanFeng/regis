@@ -11,14 +11,31 @@ const (
 
 )
 
+// DB 面向server的DB模型
 type DB interface {
 	Exec(cmd *Command) Reply
+	SetStatus(status WorldStatus)
+	GetStatus() WorldStatus
+	GetSpaceNum() int
+	GetSDB(i int) SDB
+}
+
+// SDB 面向命令的DB模型
+type SDB interface {
+	Exec(cmd *Command) Reply
+	SetStatus(status WorldStatus)
+	GetStatus() WorldStatus
 	RangeKV(ch <-chan struct{}) chan DBKV
+	PutData(key string, val interface{}) int
+	GetData(key string) (interface{}, bool)
+	Size() int
+	TTLSize() int
 }
 
 type DBKV struct {
-	Index int
+	//Index int
 	DictKV
+	TTL int64
 }
 
 type DictKV struct {
