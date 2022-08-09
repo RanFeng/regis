@@ -11,6 +11,14 @@ const (
 	expireDictSize = 1 << 10
 )
 
+type ReqType int // 获取 SingleDB 的 core 的请求类型
+
+const (
+	ReqWrite     ReqType = iota // 写请求
+	ReqFirstRead                // 首次读请求
+	ReqMissRead                 // 首次读miss，后续的读请求
+)
+
 type SDBRealFunc func(db *SingleDB, args []string) base.Reply
 
 func GetSDBReal(exec interface{}) SDBRealFunc {
@@ -37,10 +45,48 @@ type SingleDB struct {
 	// status == base.WorldMoving 时，如果 bgDB 里有值，就蚂蚁搬家式地写入 db 中，在这段期间，不允许 BGSave
 	//bgDB base.DB
 	bgDB *core
+
+	// 当 status = base.WorldFrozen, base.WorldMoving 时，这时候直接计算 db 的键的数量作为 SingleDB 的键数是有偏差的
+	// 因为在这期间，很可能有一部分新的key被写入 bgDB 中了，对于这部分新增的数据，称之为luck Key，对他们的计数称为luckCount
+	// 也有一部分luck Key在这期间被删除了，对于这部分以负数计入luckCount中
+	// 对于更改的Key，不算luck Key
+	luckCount int
 }
 
-func (sdb *SingleDB) GetDB() *core {
+// GetDB 获取 SingleDB 各种状态下应该读写哪个core
+// 分为三种可能：
+// 写请求：  	mode == 0
+// 第一次读： mode == 1
+// 第二次读： mode == 2
+// 第二次读是指第一次读的时候miss了，所以需要有第二次读
+func (sdb *SingleDB) GetDB(mode ReqType) *core {
+	switch sdb.status {
+	case base.WorldNormal:
+		return sdb.db
+	case base.WorldFrozen:
+		if mode == 0 || mode == 1 {
+			return sdb.bgDB
+		} else if mode == 2 {
+			return sdb.db
+		}
+	case base.WorldMoving:
+		if mode == 1 {
+			return sdb.bgDB
+		} else if mode == 0 || mode == 2 {
+			return sdb.db
+		}
+	case base.WorldStopped:
+		return sdb.db
+	}
 	return sdb.db
+}
+
+func (sdb *SingleDB) GetOri() *core {
+	return sdb.db
+}
+
+func (sdb *SingleDB) GetBak() *core {
+	return sdb.bgDB
 }
 
 func (sdb *SingleDB) SetStatus(status base.WorldStatus) {
@@ -66,7 +112,7 @@ func (sdb *SingleDB) RangeKV(ch <-chan struct{}) chan base.DBKV {
 		defer func() {
 			close(kvs)
 		}()
-		for kv := range sdb.GetDB().data.RangeKV(ch) {
+		for kv := range sdb.db.data.RangeKV(ch) {
 			select {
 			case <-ch:
 				return
@@ -78,19 +124,63 @@ func (sdb *SingleDB) RangeKV(ch <-chan struct{}) chan base.DBKV {
 }
 
 func (sdb *SingleDB) PutData(key string, val interface{}) int {
-	return sdb.GetDB().data.Put(key, val)
+	switch sdb.status {
+	case base.WorldNormal:
+		return sdb.db.data.Put(key, val)
+	case base.WorldFrozen:
+		_, exists := sdb.db.data.Get(key)
+		change := sdb.bgDB.data.Put(key, val)
+		if !exists {
+			// TODO 此处可以计算size
+			return change
+		}
+		return 0
+	case base.WorldMoving:
+		_, exists := sdb.bgDB.data.Get(key)
+		change := sdb.db.data.Put(key, val)
+		if !exists {
+			// TODO 此处可以计算size
+			return change
+		}
+		sdb.bgDB.data.Del(key)
+		return 0
+	case base.WorldStopped:
+		return sdb.bgDB.data.Put(key, val)
+	}
+	return sdb.db.data.Put(key, val)
 }
 
 func (sdb *SingleDB) GetData(key string) (interface{}, bool) {
-	return sdb.GetDB().data.Get(key)
+	switch sdb.status {
+	case base.WorldNormal:
+		return sdb.db.data.Get(key)
+	case base.WorldFrozen:
+		val, exists := sdb.bgDB.data.Get(key)
+		if !exists {
+			return sdb.db.data.Get(key)
+		}
+		return val, exists
+	case base.WorldMoving:
+		val, exists := sdb.bgDB.data.Get(key)
+		if !exists {
+			return sdb.db.data.Get(key)
+		}
+		sdb.db.data.Put(key, val)
+		sdb.bgDB.data.Del(key)
+	case base.WorldStopped:
+		return sdb.db.data.Get(key)
+	}
+	return sdb.db.data.Get(key)
 }
 
 func (sdb *SingleDB) Size() int {
-	return sdb.GetDB().data.Len()
+	// TODO 在 bgsave期间，对bgDB写了新的key，这时候数据不准确
+	return sdb.GetDB(ReqFirstRead).data.Len()
 }
 
 func (sdb *SingleDB) TTLSize() int {
-	return sdb.GetDB().expire.Len()
+	// TODO 在 bgsave期间，对bgDB写了新的key，这时候数据不准确
+	return sdb.GetDB(ReqFirstRead).expire.Len()
 }
 
 func newSDB() *SingleDB {
