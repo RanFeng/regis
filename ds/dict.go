@@ -20,12 +20,16 @@ func (dict *Dict) Get(key string) (val interface{}, exists bool) {
 	return val, exists
 }
 
-func (dict *Dict) Have(keys ...string) []bool {
-	b := make([]bool, len(keys))
-	for i := range keys {
-		_, b[i] = dict.m[keys[i]]
+func (dict *Dict) RandomKey(num int) []string {
+	keys := make([]string, 0, num)
+	for k := range dict.m {
+		if num == 0 {
+			break
+		}
+		keys = append(keys, k)
+		num--
 	}
-	return b
+	return keys
 }
 
 // Put 插入，返回更改后新增的数量
@@ -41,10 +45,10 @@ func (dict *Dict) Put(key string, val interface{}) int {
 // Del 删除，返回删除后更改的数量
 func (dict *Dict) Del(key string) int {
 	_, ok := dict.m[key]
-	delete(dict.m, key)
 	if !ok {
 		return 0
 	}
+	delete(dict.m, key)
 	return 1
 }
 

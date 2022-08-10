@@ -47,6 +47,22 @@ func (r *bulkReply) Bytes() []byte {
 	return []byte(string(PrefixBulk) + strconv.Itoa(len(r.Arg)) + CRLF + string(r.Arg) + CRLF)
 }
 
+// BulkStrReply 用于返回一个字符串
+type bulkStrReply struct {
+	msg string
+}
+
+func BulkStrReply(msg string) *bulkStrReply {
+	return &bulkStrReply{msg: msg}
+}
+
+func (r *bulkStrReply) Bytes() []byte {
+	if len(r.msg) == 0 {
+		return []byte("$-1\r\n")
+	}
+	return []byte(string(PrefixBulk) + strconv.Itoa(len(r.msg)) + CRLF + r.msg + CRLF)
+}
+
 // arrayReply 用于返回多行信息，可以是字符串和int类型的混合
 type arrayReply struct {
 	msg []interface{}
@@ -195,4 +211,13 @@ func ErrReply(status string) *errReply {
 func (r *errReply) Bytes() []byte {
 	ret := fmt.Sprintf("%v%v%v", PrefixErr, r.msg, CRLF)
 	return []byte(ret)
+}
+
+// parseReply 返回一个错误
+type parseErrReply struct{}
+
+var ParseErrReply = &parseErrReply{}
+
+func (r *parseErrReply) Bytes() []byte {
+	return []byte("-ERR parse Error occurred\r\n")
 }

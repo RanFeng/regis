@@ -2,14 +2,18 @@ package command
 
 import (
 	"code/regis/base"
+	"code/regis/database"
 	"code/regis/tcp"
 )
 
 func sdbInit() {
-	base.RegCmdInfo("set", -3, base.CmdLevelSDB, execSet)
-	base.RegCmdInfo("get", 2, base.CmdLevelSDB, execGet)
-	base.RegCmdInfo("MSet", -3, base.CmdLevelSDB, execMSet)
-	base.RegCmdInfo("MGet", -2, base.CmdLevelSDB, execMGet)
+	base.RegCmdInfo("set", -3, base.CmdLevelSDB, database.Set)
+	base.RegCmdInfo("get", 2, base.CmdLevelSDB, database.Get)
+	base.RegCmdInfo("mset", -3, base.CmdLevelSDB, database.MSet)
+	base.RegCmdInfo("mget", -2, base.CmdLevelSDB, database.MGet)
+	base.RegCmdInfo("mget", -2, base.CmdLevelSDB, database.MGet)
+	base.RegCmdInfo("del", -2, base.CmdLevelSDB, database.Del)
+	base.RegCmdInfo("dbsize", 1, base.CmdLevelSDB, database.DBSize)
 }
 
 func mdbInit() {

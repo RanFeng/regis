@@ -1,18 +1,17 @@
-package command
+package database
 
 import (
 	"code/regis/base"
-	"code/regis/database"
 	"code/regis/lib/utils"
 	"code/regis/redis"
 )
 
-func execSet(db *database.SingleDB, args []string) base.Reply {
-	_ = db.PutData(args[1], base.String(args[2]))
+func Set(db *SingleDB, args []string) base.Reply {
+	_ = db.PutData(args[1], base.RString(args[2]))
 	return redis.OkReply
 }
 
-func execGet(db *database.SingleDB, args []string) base.Reply {
+func Get(db *SingleDB, args []string) base.Reply {
 	val, ok := db.GetData(args[1])
 	if !ok {
 		return redis.NilReply
@@ -20,16 +19,16 @@ func execGet(db *database.SingleDB, args []string) base.Reply {
 	return redis.BulkReply(utils.InterfaceToBytes(val))
 }
 
-func execMSet(db *database.SingleDB, args []string) base.Reply {
+func MSet(db *SingleDB, args []string) base.Reply {
 	if len(args)%2 == 0 {
 		return redis.ArgNumErrReply(args[0])
 	}
 	for i := 1; i+1 < len(args); i += 2 {
-		_ = db.PutData(args[i], base.String(args[i+1]))
+		_ = db.PutData(args[i], base.RString(args[i+1]))
 	}
 	return redis.OkReply
 }
-func execMGet(db *database.SingleDB, args []string) base.Reply {
+func MGet(db *SingleDB, args []string) base.Reply {
 	ret := make([]interface{}, 0, len(args)-1)
 	for i := 1; i < len(args); i++ {
 		val, ok := db.GetData(args[i])
@@ -40,4 +39,12 @@ func execMGet(db *database.SingleDB, args []string) base.Reply {
 		}
 	}
 	return redis.ArrayReply(ret)
+}
+func Del(db *SingleDB, args []string) base.Reply {
+	ret := db.RemoveData(args[1:]...)
+	return redis.IntReply(ret)
+}
+
+func DBSize(db *SingleDB, args []string) base.Reply {
+	return redis.IntReply(db.Size())
 }

@@ -45,13 +45,16 @@ func Select(server *Server, conn base.Conn, args []string) base.Reply {
 }
 
 func Save(server *Server, conn base.Conn, args []string) base.Reply {
+	if server.GetDB().GetStatus() != base.WorldNormal {
+		return redis.ErrReply("ERR can not save in bgsave")
+	}
 	server.GetDB().SetStatus(base.WorldStopped)
 	defer server.GetDB().SetStatus(base.WorldNormal)
 
 	ch := make(chan struct{})
 	defer close(ch)
 
-	err := file.SaveRDB(server.GetDB())
+	err := file.SaveRDB(server.GetDB().SaveRDB)
 	if err != nil {
 		return redis.ErrReply("ERR in save")
 	}
@@ -59,13 +62,14 @@ func Save(server *Server, conn base.Conn, args []string) base.Reply {
 }
 
 func BGSave(server *Server, conn base.Conn, args []string) base.Reply {
+	if server.GetDB().GetStatus() != base.WorldNormal {
+		return redis.ErrReply("ERR can not save in bgsave")
+	}
 	server.GetDB().SetStatus(base.WorldFrozen)
 
-	ch := make(chan struct{})
-	defer close(ch)
+	go file.SaveRDB(server.GetDB().SaveRDB) //nolint:errcheck
 
-	go file.SaveRDB(server.GetDB())
-	return redis.OkReply
+	return redis.BulkStrReply("Background saving started")
 }
 
 func Publish(server *Server, conn base.Conn, args []string) base.Reply {

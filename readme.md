@@ -16,3 +16,5 @@
 - [ ] set -> Set
 - [ ] zset -> SkipList
 
+# TODO
+- [ ] BGsave时，有数量bug

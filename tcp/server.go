@@ -41,7 +41,7 @@ func (s *Server) GetDB() base.DB {
 func (s *Server) SetDB(db base.DB) {
 	s.db = db
 }
-func (s *Server) GetWorkChan() chan *base.Command {
+func (s *Server) GetWorkChan() <-chan *base.Command {
 	return s.workChan
 }
 func (s *Server) SetWorkChan(ch chan *base.Command) {
@@ -67,7 +67,6 @@ func InitServer(prop *conf.RegisConf) *Server {
 
 	server.pubsubDict = ds.NewDict(128)
 	server.pubsubPattern = ds.NewLinkedList()
-	//server.db = database.NewMultiDB()
 
 	go server.closeClient()
 	return server

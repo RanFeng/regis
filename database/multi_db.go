@@ -4,6 +4,8 @@ import (
 	"code/regis/base"
 	"code/regis/conf"
 	"code/regis/redis"
+
+	"github.com/hdt3213/rdb/core"
 )
 
 const (
@@ -49,6 +51,38 @@ func (md *MultiDB) GetSDB(i int) base.SDB {
 		return md.sDB[0]
 	}
 	return md.sDB[i]
+}
+
+func (md *MultiDB) FreshNormal() {
+	for i := range md.sDB {
+		if md.sDB[i].GetStatus() != base.WorldNormal {
+			return
+		}
+	}
+	md.status = base.WorldNormal
+}
+
+func (md *MultiDB) SaveRDB(rdb *core.Encoder) error {
+	var err error
+	for i := range md.sDB {
+		if md.sDB[i].ShadowSize() == 0 {
+			md.sDB[i].SetStatus(base.WorldNormal)
+			md.FreshNormal()
+			continue
+		}
+		err = rdb.WriteDBHeader(uint(i), uint64(md.sDB[i].ShadowSize()), uint64(md.sDB[i].TTLSize()))
+		if err != nil {
+			return err
+		}
+		err = md.sDB[i].SaveRDB(rdb)
+		if err != nil {
+			return err
+		}
+
+		// 让主线程知道这个sdb可以被moving
+		go md.sDB[i].NotifyMoving(i)
+	}
+	return nil
 }
 
 func NewMultiDB() *MultiDB {

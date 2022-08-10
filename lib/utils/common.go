@@ -28,7 +28,7 @@ func InterfaceToString(value interface{}) string {
 	switch v := value.(type) {
 	case string:
 		return v
-	case base.String:
+	case base.RString:
 		return string(v)
 	case fmt.Stringer:
 		return v.String()

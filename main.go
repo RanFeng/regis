@@ -18,23 +18,39 @@ var (
 
 func mainRoutine() {
 	for {
-		cmd := <-server.GetWorkChan()
-		if len(cmd.Query) == 0 {
-			cmd.Reply = redis.NilReply
-		} else {
-			handler, ok := base.GetCmdInfo(cmd.Query[0])
-			if !ok {
-				cmd.Reply = redis.UnknownCmdErrReply(cmd.Query[0])
-			} else if !handler.Validate(cmd.Query) {
-				cmd.Reply = redis.ArgNumErrReply(cmd.Query[0])
-			} else if handler.Level(base.CmdLevelServer) {
-				exec := tcp.GetServerReal(handler.GetExec())
-				cmd.Reply = exec(server, cmd.Conn, cmd.Query)
+		if server.GetDB().GetStatus() == base.WorldStopped {
+			continue
+		}
+
+		select {
+		case cmd := <-server.GetWorkChan():
+			if len(cmd.Query) == 0 {
+				cmd.Reply = redis.NilReply
 			} else {
-				cmd.Reply = server.GetDB().Exec(cmd)
+				handler, ok := base.GetCmdInfo(cmd.Query[0])
+				if !ok {
+					cmd.Reply = redis.UnknownCmdErrReply(cmd.Query[0])
+				} else if !handler.Validate(cmd.Query) {
+					cmd.Reply = redis.ArgNumErrReply(cmd.Query[0])
+				} else if handler.Level(base.CmdLevelServer) {
+					exec := tcp.GetServerReal(handler.GetExec())
+					cmd.Reply = exec(server, cmd.Conn, cmd.Query)
+				} else {
+					cmd.Reply = server.GetDB().Exec(cmd)
+				}
+			}
+			cmd.Done()
+		case index := <-base.NeedMoving:
+			log.Info("moving %v", index)
+			if server.GetDB().GetSDB(index).GetStatus() == base.WorldMoving {
+				server.GetDB().GetSDB(index).MoveData()
+				if server.GetDB().GetSDB(index).GetStatus() == base.WorldNormal {
+					log.Info("fresh %v", index)
+					server.GetDB().FreshNormal()
+				}
 			}
 		}
-		cmd.Done()
+
 	}
 }
 
@@ -60,7 +76,6 @@ func makeServer() *tcp.Server {
 }
 
 func main() {
-
 	conf.LoadConf("redis.conf")
 
 	command.ServerInit()

@@ -1,6 +1,10 @@
 package base
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/hdt3213/rdb/core"
+)
 
 const (
 	CmdLevelSDB     = iota // SingleDB 下运行的命令
@@ -11,6 +15,10 @@ const (
 
 )
 
+var (
+	NeedMoving = make(chan int) // 让主线程知道某个sdb可以被moving
+)
+
 // DB 面向server的DB模型
 type DB interface {
 	Exec(cmd *Command) Reply
@@ -18,6 +26,8 @@ type DB interface {
 	GetStatus() WorldStatus
 	GetSpaceNum() int
 	GetSDB(i int) SDB
+	FreshNormal()
+	SaveRDB(rdb *core.Encoder) error
 }
 
 // SDB 面向命令的DB模型
@@ -29,7 +39,10 @@ type SDB interface {
 	PutData(key string, val interface{}) int
 	GetData(key string) (interface{}, bool)
 	RemoveData(keys ...string) int
+	NotifyMoving(i int)
+	MoveData()
 	Size() int
+	ShadowSize() int
 	TTLSize() int
 }
 

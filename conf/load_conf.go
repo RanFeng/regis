@@ -18,6 +18,6 @@ func LoadConf(filePath string) {
 		Port:       6399,
 		MaxClients: 16,
 		Databases:  16,
-		RDBName:    "dump.rdb",
+		RDBName:    "/Users/admin/go/src/code/regis/dump.rdb",
 	}
 }
