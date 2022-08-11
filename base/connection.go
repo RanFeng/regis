@@ -21,6 +21,8 @@ type Conn interface {
 
 	NSubChannel() LList
 	PSubChannel() LList
+
+	RemoteAddr() string
 }
 
 // Reply server单次返回给client的数据

@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"code/regis/base"
 	"code/regis/lib/utils"
 	"fmt"
 	"strconv"
@@ -93,25 +94,45 @@ func (r *arrayReply) Bytes() []byte {
 	return []byte(ret)
 }
 
-// mulReply 用于返回多行信息，可以是字符串和int类型的混合
+// mulReply 用于返回多行信息
 type multiReply struct {
-	msg []interface{}
+	r []base.Reply
 }
 
-func MultiReply(q []interface{}) *multiReply {
-	return &multiReply{msg: q}
+func MultiReply(q []base.Reply) *multiReply {
+	return &multiReply{r: q}
 }
 
 func (r *multiReply) Bytes() []byte {
-	if len(r.msg) == 0 {
+	if len(r.r) == 0 {
 		return []byte(nullBulkReplyBytes)
 	}
-	ret := fmt.Sprintf("%v%v%v", PrefixArray, len(r.msg), CRLF)
-	for i := 0; i < len(r.msg); i++ {
-		if r.msg[i] == nil {
+	ret := fmt.Sprintf("%v%v%v", PrefixArray, len(r.r), CRLF)
+	for i := range r.r {
+		ret += string(r.r[i].Bytes())
+	}
+	return []byte(ret)
+}
+
+// cmdReply 用于返回一行客户端执行的cmd，也是fake client的命令请求信息
+type cmdReply struct {
+	cmd []interface{}
+}
+
+func CmdReply(cmd ...interface{}) *cmdReply {
+	return &cmdReply{cmd: cmd}
+}
+
+func (r *cmdReply) Bytes() []byte {
+	if len(r.cmd) == 0 {
+		return []byte(nullBulkReplyBytes)
+	}
+	ret := fmt.Sprintf("%v%v%v", PrefixArray, len(r.cmd), CRLF)
+	for i := 0; i < len(r.cmd); i++ {
+		if r.cmd[i] == nil {
 			ret += fmt.Sprintf("%v%v%v", PrefixBulk, -1, CRLF)
 		} else {
-			msgS := utils.InterfaceToString(r.msg[i])
+			msgS := utils.InterfaceToString(r.cmd[i])
 			ret += fmt.Sprintf("%v%v%v", PrefixBulk, len(msgS), CRLF)
 			ret += fmt.Sprintf("%v%v", msgS, CRLF)
 		}

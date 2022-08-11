@@ -1,4 +1,4 @@
-package client
+package tcp
 
 import (
 	"bufio"
@@ -7,6 +7,7 @@ import (
 	"code/regis/redis"
 	"io"
 	"net"
+	"time"
 )
 
 type Client struct {
@@ -37,12 +38,21 @@ func (cli *Client) Recv() base.Reply {
 			cli.Close()
 			return redis.NilReply
 		}
-		if msg[0] == redis.PrefixErr[0] {
+		switch msg[0] {
+		case redis.PrefixErr[0]:
 			log.Error("%v", string(msg[:len(msg)-2]))
-		} else {
+		case redis.PrefixStr[0], redis.PrefixInt[0]:
 			log.Debug("%v", string(msg[:len(msg)-2]))
+		case redis.PrefixArray[0], redis.PrefixBulk[0]:
+			log.Debug("bluk or array")
+		default:
+			log.Debug("len: %v, msg: %v", len(msg), msg)
 		}
 	}
+}
+
+func (cli *Client) Reply() base.Reply {
+	return redis.ParseReply(cli.conn)
 }
 
 func (cli *Client) RecvN(buf []byte) (n int, err error) {
@@ -64,4 +74,20 @@ func NewClient(addr string) (*Client, error) {
 		addr: addr,
 	}
 	return cli, nil
+}
+
+func MustNewClient(addr string) *Client {
+	cli := &Client{
+		addr: addr,
+	}
+	var err error
+	for {
+		cli.conn, err = net.Dial("tcp", addr)
+		if err == nil {
+			break
+		}
+		log.Error("Error condition on socket for SYNC: Connection refused %v", addr)
+		time.Sleep(time.Second)
+	}
+	return cli
 }

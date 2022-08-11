@@ -3,24 +3,24 @@ package debug
 import (
 	"bytes"
 	"code/regis/base"
-	"code/regis/client"
 	log "code/regis/lib"
 	"code/regis/redis"
+	"code/regis/tcp"
 	"testing"
 )
 
 type Debugger struct {
 	T   *testing.T
-	Cli *client.Client
+	Cli *tcp.Client
 }
 
-func (d *Debugger) SetCli(c *client.Client) {
+func (d *Debugger) SetCli(c *tcp.Client) {
 	d.Cli = c
 }
 
 func (d *Debugger) CmdReply(want base.Reply, cmd ...interface{}) {
 	log.Info("cmd is %v", cmd)
-	d.Cli.Send(redis.MultiReply(cmd))
+	d.Cli.Send(redis.CmdReply(cmd))
 	wb := want.Bytes()
 	buf := make([]byte, len(wb))
 	num, err := d.Cli.RecvN(buf)
@@ -40,7 +40,7 @@ func (d *Debugger) CmdReply(want base.Reply, cmd ...interface{}) {
 	}
 }
 func (d *Debugger) CmdReply_(want base.Reply, cmd ...interface{}) {
-	d.Cli.Send(redis.MultiReply(cmd))
+	d.Cli.Send(redis.CmdReply(cmd))
 	wb := want.Bytes()
 
 	buf, err := d.Cli.RecvAll()
@@ -58,7 +58,7 @@ func (d *Debugger) CmdReply_(want base.Reply, cmd ...interface{}) {
 	log.Info("cmd is ok %v", cmd)
 }
 
-func NewDebugger(c *client.Client, t *testing.T) *Debugger {
+func NewDebugger(c *tcp.Client, t *testing.T) *Debugger {
 	d := &Debugger{
 		Cli: c,
 		T:   t,

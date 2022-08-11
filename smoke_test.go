@@ -1,24 +1,24 @@
 package main
 
 import (
-	"code/regis/client"
 	"code/regis/debug"
 	log "code/regis/lib"
 	"code/regis/redis"
+	"code/regis/tcp"
 	"os"
 	"testing"
 	"time"
 )
 
 var (
-	cli *client.Client
+	cli *tcp.Client
 	err error
 )
 
 func TestMain(m *testing.M) {
 	go main()
 	time.Sleep(200 * time.Millisecond)
-	cli, err = client.NewClient(server.GetAddr())
+	cli, err = tcp.NewClient(server.GetAddr())
 	if err != nil {
 		log.Error("new fake client fail %v", err)
 		return

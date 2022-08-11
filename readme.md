@@ -2,13 +2,19 @@
 
 - [x] `ping, get, set, mget, mset, select`
 - [x] `select, publish, subscribe, unsubscribe`
+- [x] `save, bgsave, del, dbsize`
 - [x] RDB load, fake client
-- [ ] RDB save
+- [x] RDB save
+- [ ] redis offset
+- [ ] slaveof, PSYNC
+
+- [ ] info replication
+- [ ] boot from conf
 - [ ] AOF
 - [ ] master and slave
 - [ ] sentinel
 - [ ] cluster
-
+- [ ] expire key
 
 - [x] string -> string
 - [x] list -> LinkedList
@@ -17,4 +23,7 @@
 - [ ] zset -> SkipList
 
 # TODO
-- [ ] BGsave时，有数量bug
+- [x] BGsave时，有数量bug
+- [ ] server中的workChan也许可以当成全局变量
+- [ ] base.Conn 也许可以不用了
+

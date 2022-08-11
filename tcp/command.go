@@ -5,8 +5,12 @@ import (
 	"code/regis/conf"
 	"code/regis/ds"
 	"code/regis/file"
+	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"code/regis/redis"
+	"fmt"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -142,4 +146,61 @@ func UnSubscribe(server *Server, conn base.Conn, args []string) base.Reply {
 		ret = append(ret, _unsub, args[i], i-1)
 	}
 	return redis.ArrayReply(ret)
+}
+
+func ReplicaOf(server *Server, conn base.Conn, args []string) base.Reply {
+	_, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil {
+		return redis.ErrReply("ERR value is not an integer or out of range")
+	}
+
+	go func(server *Server) {
+		cli := MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]))
+		cli.Send(redis.CmdReply("ping"))
+		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
+		cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
+		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
+		cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
+		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
+		cli.Send(redis.CmdReply("PSYNC", "?", -1))
+		go func() {
+			for {
+				buf := make([]byte, 40)
+				n, err := cli.RecvN(buf)
+				if err != nil {
+					log.Error("%v", err)
+				}
+				log.Info("%v %v", n, utils.BytesViz(buf))
+			}
+		}()
+
+	}(server)
+
+	return redis.OkReply
+}
+
+func Info(server *Server, conn base.Conn, args []string) base.Reply {
+	sInfo := server.GetInfo()
+	return redis.StrReply(sInfo)
+}
+
+func ReplConf(server *Server, conn base.Conn, args []string) base.Reply {
+	subCmd := strings.ToLower(args[1])
+	switch subCmd {
+	case "listening-port":
+		ip, _ := utils.ParseAddr(conn.RemoteAddr())
+		cli := MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]))
+		server.slave.Put(conn.RemoteAddr(), cli)
+
+	}
+	return redis.OkReply
+}
+
+func PSync(server *Server, conn base.Conn, args []string) base.Reply {
+	if args[1] != server.replid {
+		// todo begin bgsave
+		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.replid, 0))
+	}
+	sInfo := server.GetInfo()
+	return redis.StrReply(sInfo)
 }

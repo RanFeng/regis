@@ -2,6 +2,7 @@ package redis
 
 import (
 	"bufio"
+	"code/regis/base"
 	log "code/regis/lib"
 	"errors"
 	"io"
@@ -108,67 +109,67 @@ func Parse(conn io.Reader) chan Payload {
 	return cmdChan
 }
 
-//func parseInterface(conn io.Reader) base.Reply {
-//	r := bufio.NewReader(conn)
-//	msg, err := r.ReadBytes('\n')
-//	if err != nil {
-//		return NilReply
-//	}
-//	switch msg[0] {
-//	case PrefixArray[0]:
-//		argsNum, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
-//		if err != nil {
-//			log.Fatal("array parse err")
-//			return NilReply
-//		}
-//		if argsNum <= 0 {
-//			log.Fatal("array length is zero")
-//			return NilReply
-//		}
-//		query := make([]interface{}, argsNum)
-//		for i := 0; i < int(argsNum); i++ {
-//			query[i] = parseInterface(conn)
-//		}
-//		return ArrayReply(query)
-//	case PrefixBulk[0]:
-//		bulkLen, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
-//		if err != nil {
-//			log.Fatal("bulk parse err")
-//			return NilReply
-//		}
-//		if bulkLen <= 0 {
-//			log.Fatal("bulk length is zero")
-//			return NilReply
-//		}
-//		buf := make([]byte, bulkLen)
-//		_, err = io.ReadFull(r, buf)
-//		if err != nil {
-//			log.Fatal("bulk read err")
-//			return NilReply
-//		}
-//		end := make([]byte, len(CRLF))
-//		_, err = io.ReadFull(r, end)
-//		if err != nil {
-//			log.Fatal("CRLF read err")
-//			return NilReply
-//		}
-//		if string(end) != CRLF {
-//			log.Fatal("bulk end is invalid %v", end)
-//			return NilReply
-//		}
-//		return StrReply(string(buf))
-//	case PrefixErr[0]:
-//		return ErrReply(string(msg[1 : len(msg)-2]))
-//	case PrefixStr[0]:
-//		return StrReply(string(msg[1 : len(msg)-2]))
-//	case PrefixInt[0]:
-//		v, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
-//		if err != nil {
-//			log.Fatal("ParseInt err")
-//			return NilReply
-//		}
-//		return IntReply(int(v))
-//	}
-//
-//	return nil
-//}
+func ParseReply(conn io.Reader) base.Reply {
+	r := bufio.NewReader(conn)
+	msg, err := r.ReadBytes('\n')
+	if err != nil {
+		return NilReply
+	}
+	switch msg[0] {
+	case PrefixArray[0]:
+		argsNum, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
+		if err != nil {
+			log.Fatal("array parse err")
+			return NilReply
+		}
+		if argsNum <= 0 {
+			log.Fatal("array length is zero")
+			return NilReply
+		}
+		query := make([]base.Reply, argsNum)
+		for i := 0; i < int(argsNum); i++ {
+			query[i] = ParseReply(conn)
+		}
+		return MultiReply(query)
+	case PrefixBulk[0]:
+		bulkLen, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
+		if err != nil {
+			log.Fatal("bulk parse err")
+			return NilReply
+		}
+		if bulkLen <= 0 {
+			log.Fatal("bulk length is zero")
+			return NilReply
+		}
+		buf := make([]byte, bulkLen)
+		_, err = io.ReadFull(r, buf)
+		if err != nil {
+			log.Fatal("bulk read err")
+			return NilReply
+		}
+		end := make([]byte, len(CRLF))
+		_, err = io.ReadFull(r, end)
+		if err != nil {
+			log.Fatal("CRLF read err")
+			return NilReply
+		}
+		if string(end) != CRLF {
+			log.Fatal("bulk end is invalid %v", end)
+			return NilReply
+		}
+		return StrReply(string(buf))
+	case PrefixErr[0]:
+		return ErrReply(string(msg[1 : len(msg)-2]))
+	case PrefixStr[0]:
+		return StrReply(string(msg[1 : len(msg)-2]))
+	case PrefixInt[0]:
+		v, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
+		if err != nil {
+			log.Fatal("ParseInt err")
+			return NilReply
+		}
+		return IntReply(int(v))
+	}
+
+	return nil
+}

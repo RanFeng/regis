@@ -27,12 +27,18 @@ type Connection struct {
 	pubsubPattern *ds.LinkedList
 }
 
+func (c *Connection) RemoteAddr() string {
+	return c.conn.RemoteAddr().String()
+}
+
 func (c *Connection) GetID() int64 {
 	return c.id
 }
+
 func (c *Connection) GetDBIndex() int {
 	return c.selectedDB
 }
+
 func (c *Connection) SetDBIndex(i int) {
 	c.selectedDB = i
 }
@@ -93,7 +99,7 @@ func (c *Connection) PSubChannel() base.LList {
 	return c.pubsubPattern
 }
 
-func initClient(conn net.Conn, server *Server) *Connection {
+func initConnection(conn net.Conn, server *Server) *Connection {
 	log.Debug("get conn client %v", utils.GetConnFd(conn))
 	c := &Connection{
 		id:   utils.GetConnFd(conn),

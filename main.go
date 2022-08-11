@@ -2,7 +2,6 @@ package main
 
 import (
 	"code/regis/base"
-	"code/regis/client"
 	"code/regis/command"
 	"code/regis/conf"
 	"code/regis/database"
@@ -14,6 +13,7 @@ import (
 
 var (
 	server *tcp.Server
+	client *tcp.Client
 )
 
 func mainRoutine() {
@@ -24,6 +24,7 @@ func mainRoutine() {
 
 		select {
 		case cmd := <-server.GetWorkChan():
+			log.Info("query %v", cmd.Query)
 			if len(cmd.Query) == 0 {
 				cmd.Reply = redis.NilReply
 			} else {
@@ -56,17 +57,12 @@ func mainRoutine() {
 
 func loadRDB() {
 	query := file.LoadRDB(conf.Conf.RDBName)
-	cli, err := client.NewClient(server.GetAddr())
-	if err != nil {
-		log.Error("new fake client fail %v", err)
-		return
-	}
-	go cli.Recv()
+	client = tcp.MustNewClient(server.GetAddr())
 	for i := range query {
-		//log.Info("query %v", query[i])
-		cli.Send(redis.MultiReply(query[i]))
+		client.Send(redis.CmdReply(query[i]))
+		_, _ = client.RecvAll()
 	}
-	cli.Close()
+	//client.Close()
 }
 
 func makeServer() *tcp.Server {

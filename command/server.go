@@ -28,6 +28,12 @@ func serverInit() {
 	base.RegCmdInfo("publish", 3, base.CmdLevelServer, tcp.Publish)
 	base.RegCmdInfo("subscribe", -2, base.CmdLevelServer, tcp.Subscribe)
 	base.RegCmdInfo("unsubscribe", -2, base.CmdLevelServer, tcp.UnSubscribe)
+
+	// 主从
+	base.RegCmdInfo("replicaof", 3, base.CmdLevelServer, tcp.ReplicaOf)
+	base.RegCmdInfo("info", -1, base.CmdLevelServer, tcp.Info)
+	base.RegCmdInfo("replconf", -3, base.CmdLevelServer, tcp.ReplConf)
+	base.RegCmdInfo("psync", 3, base.CmdLevelServer, tcp.PSync)
 }
 
 func ServerInit() {

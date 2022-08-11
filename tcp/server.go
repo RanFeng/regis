@@ -5,18 +5,29 @@ import (
 	"code/regis/conf"
 	"code/regis/ds"
 	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/semaphore"
 )
 
+type replica struct {
+	replid string
+	slave  *ds.Dict // 用于存储slave的client, ip:port -> *Client
+	master *Client  // 用于存储master的client
+
+	replPingSlavePeriod int // 给slave发心跳包的周期
+}
+
 type Server struct {
+	replica
 	lock      sync.Mutex          // 对list操作的锁
 	semp      *semaphore.Weighted // 用于控制最大客户端连接数量
-	list      *ds.LinkedList      // 存储已连接的client
+	list      *ds.LinkedList      // 存储已连接的connection
 	closeChan chan int64          // 用于监听conn的断连，close时就将client从list中删除se可连接的信号量+1
 
 	// db 是服务端的主数据库
@@ -30,6 +41,14 @@ type Server struct {
 
 	address    string
 	maxClients int64
+}
+
+func (s *Server) GetReplid() string {
+	return s.replid
+}
+
+func (s *Server) SetReplid(id string) {
+	s.replid = id
 }
 
 func (s *Server) GetAddr() string {
@@ -55,18 +74,35 @@ func (s *Server) GetPPubSub() *ds.LinkedList {
 	return s.pubsubPattern
 }
 
+func (s *Server) GetInfo() string {
+	serverInfo := `# Server
+redis_version:6.2.5
+redis_mode:standalone
+run_id:%v
+tcp_port:%v
+`
+	port := strings.Split(s.address, ":")[1]
+	return fmt.Sprintf(serverInfo, s.replid, port)
+}
+
 func InitServer(prop *conf.RegisConf) *Server {
 	server := &Server{}
+	server.replid = utils.GetRandomHexChars(40)
 	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
 	server.list = &ds.LinkedList{}
+
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
 	server.workChan = make(chan *base.Command)
 	server.closeChan = make(chan int64)
 
 	server.pubsubDict = ds.NewDict(128)
 	server.pubsubPattern = ds.NewLinkedList()
+
+	server.slave = ds.NewDict(8)
+
+	server.replPingSlavePeriod = 10
 
 	go server.closeClient()
 	return server
@@ -93,7 +129,7 @@ func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 		log.Error("semp acquire fail %v", err)
 	}
 	//log.Debug("get semp now is %v", s.list.Len())
-	c := initClient(conn, s)
+	c := initConnection(conn, s)
 	s.lock.Lock()
 	defer s.lock.Unlock()
 	s.list.Append(c)

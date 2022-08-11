@@ -4,9 +4,12 @@ import (
 	"code/regis/base"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net"
 	"reflect"
 	"strconv"
+	"strings"
+	"unsafe"
 )
 
 func GetConnFd(l net.Conn) int64 {
@@ -17,8 +20,46 @@ func GetConnFd(l net.Conn) int64 {
 	return fd
 }
 
+func GetRandomHexChars(len int) string {
+	chars := "0123456789abcdef"
+	ret := make([]byte, len)
+	for i := 0; i < len; {
+		r := rand.Int63()
+		for i < len && r >= 16 {
+			ret[i] = chars[r&0xF]
+			r = r >> 4
+			i++
+		}
+	}
+	return *(*string)(unsafe.Pointer(&ret))
+}
+
+func ParseAddr(addr string) (ip, port string) {
+	s := strings.Split(addr, ":")
+	return s[0], s[1]
+}
+
 func InterfaceToBytes(val interface{}) []byte {
 	return []byte(InterfaceToString(val))
+}
+
+func BytesViz(buf []byte) string {
+	str := ""
+	for _, b := range buf {
+		if b >= 32 {
+			str += string(b)
+			continue
+		}
+		switch b {
+		case '\r':
+			str += `\r`
+		case '\n':
+			str += `\n`
+		default:
+			str += fmt.Sprintf(`\%d`, b)
+		}
+	}
+	return str
 }
 
 func InterfaceToString(value interface{}) string {

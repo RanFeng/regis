@@ -1,4 +1,4 @@
-package client
+package tcp
 
 import (
 	"code/regis/redis"
