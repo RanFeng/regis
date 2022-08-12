@@ -3,16 +3,22 @@ package tcp
 import (
 	"bufio"
 	"code/regis/base"
+	"code/regis/conf"
+	"code/regis/file"
 	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"code/regis/redis"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 )
 
 type Client struct {
-	conn net.Conn
-	addr string // server addr
+	server *Server
+	conn   net.Conn
+	addr   string // server addr
 }
 
 func (cli *Client) GetConn() net.Conn {
@@ -64,21 +70,71 @@ func (cli *Client) RecvAll() (buf []byte, err error) {
 	return io.ReadAll(cli.conn)
 }
 
-func NewClient(addr string) (*Client, error) {
+func (cli *Client) Handler() {
+	defer func() {
+		cli.Close()
+	}()
+	cli.Send(redis.CmdReply("ping"))
+	if !redis.Equal(cli.Reply(), redis.StrReply("PONG")) {
+		return
+	}
+	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
+	if !redis.Equal(cli.Reply(), redis.OkReply) {
+		return
+	}
+	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
+	if !redis.Equal(cli.Reply(), redis.OkReply) {
+		return
+	}
+	cli.Send(redis.CmdReply("PSYNC", "?", -1))
+	syncInfo := strings.Split(redis.GetString(cli.Reply()), " ")
+	cli.server.replid = syncInfo[1]
+
+	// 接下来master传递一个bulk字符串，用于传输rdb
+	// 先传递一个$509\r\n，其中509表示rdb大小
+	reader := bufio.NewReader(cli.conn)
+	msg, err := reader.ReadBytes('\n')
+	if err != nil {
+		return
+	}
+	rdbSize, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
+	if err != nil {
+		return
+	}
+	log.Info("begin to save %v %v", rdbSize, syncInfo)
+	err = file.SaveFile("dump.rdb", reader, int(rdbSize))
+	if err != nil {
+		log.Error("get rdb fail, err", err)
+	}
+	LoadRDB(cli.server, nil, nil)
+	//log.Info("size %v", rdbSize)
+	//go func() {
+	for {
+		buf := make([]byte, 40)
+		n, err := cli.RecvN(buf)
+		if err != nil {
+			log.Error("%v", err)
+		}
+		log.Info("%v %v", n, utils.BytesViz(buf))
+	}
+}
+func NewClient(addr string, server *Server) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	cli := &Client{
-		conn: conn,
-		addr: addr,
+		server: server,
+		conn:   conn,
+		addr:   addr,
 	}
 	return cli, nil
 }
 
-func MustNewClient(addr string) *Client {
+func MustNewClient(addr string, server *Server) *Client {
 	cli := &Client{
-		addr: addr,
+		server: server,
+		addr:   addr,
 	}
 	var err error
 	for {

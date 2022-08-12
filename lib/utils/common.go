@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 )
 
@@ -21,6 +22,7 @@ func GetConnFd(l net.Conn) int64 {
 }
 
 func GetRandomHexChars(len int) string {
+	rand.Seed(time.Now().UnixNano())
 	chars := "0123456789abcdef"
 	ret := make([]byte, len)
 	for i := 0; i < len; {

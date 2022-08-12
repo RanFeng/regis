@@ -2,6 +2,7 @@ package file
 
 import (
 	log "code/regis/lib"
+	"io"
 	"os"
 	"time"
 
@@ -101,5 +102,34 @@ func WriteHeader(rdb *core.Encoder) error {
 			return err
 		}
 	}
+	return nil
+}
+
+func SaveFile(fn string, conn io.Reader, size int) error {
+	file, err := os.Create(fn)
+	if err != nil {
+		log.Error("os.Create()函数执行错误，错误为:%v", err)
+		return err
+	}
+	defer file.Close()
+
+	//从网络中读数据，写入本地文件
+	for size > 0 {
+		buf := make([]byte, 20)
+		n, err := conn.Read(buf)
+
+		//写入本地文件，读多少，写多少
+		file.Write(buf[:n])
+		if err != nil {
+			if err == io.EOF {
+				log.Info("接收文件完成")
+				return nil
+			}
+			log.Error("conn.Read()方法执行出错，错误为:%v\n", err)
+			return err
+		}
+		size -= n
+	}
+	log.Info("接收文件完成")
 	return nil
 }

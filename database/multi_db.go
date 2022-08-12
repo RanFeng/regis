@@ -62,6 +62,10 @@ func (md *MultiDB) FreshNormal() {
 	md.status = base.WorldNormal
 }
 
+//func (md *MultiDB) Flush() {
+//
+//}
+
 func (md *MultiDB) SaveRDB(rdb *core.Encoder) error {
 	var err error
 	for i := range md.sDB {

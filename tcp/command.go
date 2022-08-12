@@ -107,11 +107,11 @@ func Subscribe(server *Server, conn base.Conn, args []string) base.Reply {
 		}
 		list := val.(base.LList)
 		// 将conn加入server的订阅dict
-		list.Append(conn)
+		list.PushTail(conn)
 		dict.Put(args[i], list)
 
 		// conn自己更新自己的订阅dict
-		conn.NSubChannel().Append(args[i])
+		conn.NSubChannel().PushTail(args[i])
 
 		ret = append(ret, _sub, args[i], i-1)
 	}
@@ -155,25 +155,11 @@ func ReplicaOf(server *Server, conn base.Conn, args []string) base.Reply {
 	}
 
 	go func(server *Server) {
-		cli := MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]))
-		cli.Send(redis.CmdReply("ping"))
-		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
-		cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
-		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
-		cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
-		log.Info("%v", utils.BytesViz(cli.Reply().Bytes()))
-		cli.Send(redis.CmdReply("PSYNC", "?", -1))
-		go func() {
-			for {
-				buf := make([]byte, 40)
-				n, err := cli.RecvN(buf)
-				if err != nil {
-					log.Error("%v", err)
-				}
-				log.Info("%v %v", n, utils.BytesViz(buf))
-			}
+		cli := MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]), server)
+		defer func() {
+			cli.Close()
 		}()
-
+		cli.Handler()
 	}(server)
 
 	return redis.OkReply
@@ -189,7 +175,7 @@ func ReplConf(server *Server, conn base.Conn, args []string) base.Reply {
 	switch subCmd {
 	case "listening-port":
 		ip, _ := utils.ParseAddr(conn.RemoteAddr())
-		cli := MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]))
+		cli := MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
 		server.slave.Put(conn.RemoteAddr(), cli)
 
 	}
@@ -199,8 +185,21 @@ func ReplConf(server *Server, conn base.Conn, args []string) base.Reply {
 func PSync(server *Server, conn base.Conn, args []string) base.Reply {
 	if args[1] != server.replid {
 		// todo begin bgsave
+		go file.SaveRDB(server.GetDB().SaveRDB) //nolint:errcheck
+		log.Info("not replid, need full sync")
 		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.replid, 0))
 	}
 	sInfo := server.GetInfo()
 	return redis.StrReply(sInfo)
+}
+
+func LoadRDB(server *Server, conn base.Conn, args []string) base.Reply {
+	server.FlushDB()
+	query := file.LoadRDB(conf.Conf.RDBName)
+	client := MustNewClient(server.GetAddr(), server)
+	for i := range query {
+		client.Send(redis.CmdReply(query[i]...))
+	}
+	client.Close()
+	return redis.OkReply
 }

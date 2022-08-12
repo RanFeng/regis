@@ -5,7 +5,6 @@ import (
 	"code/regis/command"
 	"code/regis/conf"
 	"code/regis/database"
-	"code/regis/file"
 	log "code/regis/lib"
 	"code/regis/redis"
 	"code/regis/tcp"
@@ -13,7 +12,7 @@ import (
 
 var (
 	server *tcp.Server
-	client *tcp.Client
+	//client *tcp.Client
 )
 
 func mainRoutine() {
@@ -55,15 +54,16 @@ func mainRoutine() {
 	}
 }
 
-func loadRDB() {
-	query := file.LoadRDB(conf.Conf.RDBName)
-	client = tcp.MustNewClient(server.GetAddr())
-	for i := range query {
-		client.Send(redis.CmdReply(query[i]))
-		_, _ = client.RecvAll()
-	}
-	//client.Close()
-}
+//func loadRDB() {
+//	client := tcp.MustNewClient(server.GetAddr())
+//	server.FlushDB()
+//	//go client.Recv()
+//	query := file.LoadRDB(conf.Conf.RDBName)
+//	for i := range query {
+//		client.Send(redis.CmdReply(query[i]...))
+//	}
+//	//client.Close()
+//}
 
 func makeServer() *tcp.Server {
 	server = tcp.InitServer(conf.Conf)
@@ -86,8 +86,9 @@ func main() {
 		}()
 		_ = tcp.ListenAndServer(server)
 	}()
-
-	go loadRDB()
+	//client = tcp.MustNewClient(server.GetAddr())
+	go tcp.LoadRDB(server, nil, nil)
+	//go loadRDB()
 
 	mainRoutine()
 }

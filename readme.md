@@ -5,7 +5,9 @@
 - [x] `save, bgsave, del, dbsize`
 - [x] RDB load, fake client
 - [x] RDB save
+- [ ] list, set, zset, hash command
 - [ ] redis offset
+- [ ] ring buffer
 - [ ] slaveof, PSYNC
 
 - [ ] info replication

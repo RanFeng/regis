@@ -1,11 +1,27 @@
 package base
 
+type CmpFunc func(interface{}) bool
+
 type LList interface {
 	Len() int64
-	Append(val interface{})
+	PushTail(val interface{})
+	PushHead(val interface{})
 	Insert(val interface{}, pos int64)
 	RemoveFirst(cmp func(interface{}) bool) interface{}
 	Range(ch <-chan struct{}) chan interface{}
+	Clear()
+}
+
+type RList interface {
+	Len() int64
+	PushTail(val interface{})
+	PushHead(val interface{})
+	InsertBefore(pivot interface{}, val interface{}) int64
+	DelEntry(val interface{}, count int64) int64
+	InsertAfter(target interface{}, val interface{}) int64
+	RemoveFirst(cmp func(interface{}) bool) interface{}
+	Range(ch <-chan struct{}) chan interface{}
+	LRange(from, to int64) []interface{}
 	Clear()
 }
 
@@ -37,7 +53,8 @@ type ZSet interface {
 }
 
 type RString string
-type RList LList
+
+//type RList LList
 type RHash Dict
 type RSet Set
 type RZSet ZSet

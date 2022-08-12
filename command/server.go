@@ -7,6 +7,7 @@ import (
 )
 
 func sdbInit() {
+	// string
 	base.RegCmdInfo("set", -3, base.CmdLevelSDB, database.Set)
 	base.RegCmdInfo("get", 2, base.CmdLevelSDB, database.Get)
 	base.RegCmdInfo("mset", -3, base.CmdLevelSDB, database.MSet)
@@ -14,6 +15,13 @@ func sdbInit() {
 	base.RegCmdInfo("mget", -2, base.CmdLevelSDB, database.MGet)
 	base.RegCmdInfo("del", -2, base.CmdLevelSDB, database.Del)
 	base.RegCmdInfo("dbsize", 1, base.CmdLevelSDB, database.DBSize)
+
+	// list
+	base.RegCmdInfo("lpush", -3, base.CmdLevelSDB, database.LPush)
+	base.RegCmdInfo("rpush", -3, base.CmdLevelSDB, database.RPush)
+	base.RegCmdInfo("lpushx", -3, base.CmdLevelSDB, database.LPushX)
+	base.RegCmdInfo("rpushx", -3, base.CmdLevelSDB, database.RPushX)
+	base.RegCmdInfo("lrange", 4, base.CmdLevelSDB, database.LRange)
 }
 
 func mdbInit() {

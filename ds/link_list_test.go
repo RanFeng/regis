@@ -1,6 +1,7 @@
 package ds
 
 import (
+	log "code/regis/lib"
 	"fmt"
 	"testing"
 	"time"
@@ -69,6 +70,23 @@ func TestLinkedList_Insert(t *testing.T) {
 	}
 	list.Insert(fmt.Sprintf("aaaa%v", 1000), 1000)
 	list.Print()
+}
+
+func TestLinkedList(t *testing.T) {
+	var list = NewLinkedList("aa", "bb", "bb", "cc")
+	for i := 0; i < 10; i++ {
+		list.Insert(fmt.Sprintf("ppp%v", i), 1)
+	}
+	n := list.index(1000)
+	log.Info("%v", n.val)
+	list.remove(n)
+	list.Print()
+	//list.Clear()
+	log.Info("%v", list.DelEntry("aca", 0))
+	list.Print()
+	//v := list.LRange(3, -10)
+	v := list.LRange(2, -13)
+	log.Info("%v", v)
 }
 
 func TestLinkedList_RemoveFirst(t *testing.T) {

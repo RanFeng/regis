@@ -1,6 +1,7 @@
 package ds
 
 import (
+	"code/regis/base"
 	log "code/regis/lib"
 	"fmt"
 )
@@ -46,55 +47,200 @@ func (list *LinkedList) Print() {
 	log.Debug(listStr)
 }
 
-func (list *LinkedList) Append(val interface{}) {
+func (list *LinkedList) PushTail(val interface{}) {
 	list.insert(&node{val: val}, list.Len())
+}
+
+func (list *LinkedList) PushHead(val interface{}) {
+	list.insert(&node{val: val}, 0)
+}
+
+// InsertAfter 当list作为 base.RList 提供出去的时候，这时候list中node的val都是字符串
+// 返回-1表示插入失败，否则返回插入后的列表长度
+func (list *LinkedList) InsertAfter(pivot interface{}, val interface{}) int64 {
+	if list.Len() == 0 {
+		return 0
+	}
+	ps := pivot.(string)
+	p := list.find(func(v interface{}) bool {
+		return ps == v.(string)
+	})
+	if p == nil {
+		return -1
+	}
+	n := &node{val: val}
+	list.insertAB(n, p, true)
+	return list.Len()
+}
+
+// InsertBefore 当list作为 base.RList 提供出去的时候，这时候list中node的val都是字符串
+// 返回-1表示插入失败，否则返回插入后的列表长度
+func (list *LinkedList) InsertBefore(pivot interface{}, val interface{}) int64 {
+	if list.Len() == 0 {
+		return 0
+	}
+	ps := pivot.(string)
+	p := list.find(func(v interface{}) bool {
+		return ps == v.(string)
+	})
+	if p == nil {
+		return -1
+	}
+	n := &node{val: val}
+	list.insertAB(n, p, false)
+	return list.Len()
 }
 
 func (list *LinkedList) Insert(val interface{}, pos int64) {
 	list.insert(&node{val: val}, pos)
 }
 
-func (list *LinkedList) RemoveFirst(cmp func(interface{}) bool) interface{} {
+// find 找出符合的首个节点
+func (list *LinkedList) find(cmp func(interface{}) bool) *node {
 	if list.Len() == 0 {
 		return nil
 	}
 
-	// 检查是否是head
-	cursor := list.head
-	if cmp(list.head.val) {
-		if list.Len() == 1 {
-			list.head = nil
-			list.tail = nil
-			list.len--
-			return cursor.val
-		} else {
-			fix(list.head.prev, list.head, list.head.next, deleteOp)
-			list.head = list.head.next
-			list.len--
-			return cursor.val
+	for cur := list.head; cur != list.tail; cur = cur.next {
+		if cmp(cur.val) {
+			return cur
 		}
 	}
 
-	// 检查是否是tail
-	cursor = list.tail
 	if cmp(list.tail.val) {
-		fix(list.tail.prev, list.tail, list.tail.next, deleteOp)
-		list.tail = list.tail.prev
-		list.len--
-		return cursor.val
-	}
-
-	cursor = list.head
-	for i := list.Len(); i > 0; i-- {
-		if cmp(cursor.val) {
-			fix(cursor.prev, cursor, cursor.next, deleteOp)
-			list.len--
-			return cursor.val
-		}
-		cursor = cursor.next
+		return list.tail
 	}
 	log.Debug("not found in list")
 	return nil
+}
+
+// index 找出下标为pos的节点，pos范围是[0, list.Len()], pos < 0 时，返回head，pos >= list.Len()时，返回tail
+func (list *LinkedList) index(pos int64) *node {
+	if list.Len() == 0 {
+		return nil
+	}
+
+	if pos <= 0 {
+		return list.head
+	}
+
+	if pos >= list.Len() {
+		return list.tail
+	}
+
+	if pos <= list.Len()/2 { // 从head遍历
+		for cur := list.head; cur != list.tail; cur = cur.next {
+			if pos == 0 {
+				return cur
+			}
+			pos--
+		}
+	} else { // 从tail遍历
+		pos = list.Len() - pos - 1
+		for cur := list.tail; cur != list.head; cur = cur.prev {
+			if pos == 0 {
+				return cur
+			}
+			pos--
+		}
+	}
+	return nil
+}
+
+// find 找出符合的所有节点
+//func (list *LinkedList) findAll(cmp func(interface{}) bool) []*node {
+//	ret := make([]*node, 0, list.Len())
+//	if list.Len() == 0 {
+//		return ret
+//	}
+//
+//	for cur := list.head; cur != list.tail; cur = cur.next {
+//		if cmp(cur.val) {
+//			ret = append(ret, cur)
+//		}
+//	}
+//
+//	if cmp(list.tail.val) {
+//		ret = append(ret, list.tail)
+//	}
+//	return ret
+//}
+
+func (list *LinkedList) remove(n *node) {
+	if n == nil {
+		return
+	}
+	defer func() { list.len-- }()
+	// 就一个结点的话，删了就直接是空list
+	if list.Len() == 1 {
+		list.head = nil
+		list.tail = nil
+		return
+	}
+	fix(n.prev, n, n.next, deleteOp)
+	if n == list.head {
+		list.head = n.next
+	}
+
+	if n == list.tail {
+		list.tail = n.prev
+	}
+}
+
+func (list *LinkedList) RemoveFirst(cmp func(interface{}) bool) interface{} {
+	n := list.find(cmp)
+	list.remove(n)
+	return n.val
+}
+
+// DelEntry 用于删除list中的元素，
+//	count > 0 : 从表头开始向表尾搜索，移除与 VALUE 相等的元素，数量为 COUNT 。
+//	count < 0 : 从表尾开始向表头搜索，移除与 VALUE 相等的元素，数量为 COUNT 的绝对值。
+//	count = 0 : 移除表中所有与 VALUE 相等的值。
+// 返回删除的数量
+func (list *LinkedList) DelEntry(val interface{}, count int64) int64 {
+	if list.Len() == 0 {
+		return 0
+	}
+	var ret int64 = 0
+
+	ps := val.(string)
+	if count > 0 {
+		for cur := list.head; cur != list.tail && ret < count; cur = cur.next {
+			if cur.val.(string) == ps {
+				list.remove(cur)
+				ret++
+			}
+		}
+		if list.tail.val.(string) == ps && ret < count {
+			list.remove(list.tail)
+			ret++
+		}
+	} else if count < 0 {
+		count = -count
+		for cur := list.tail; cur != list.head && ret < count; cur = cur.prev {
+			if cur.val.(string) == ps {
+				list.remove(cur)
+				ret++
+			}
+		}
+		if list.head.val.(string) == ps && ret < count {
+			list.remove(list.head)
+			ret++
+		}
+	} else {
+		for cur := list.head; cur != list.tail; cur = cur.next {
+			if cur.val.(string) == ps {
+				list.remove(cur)
+				ret++
+			}
+		}
+		if list.tail.val.(string) == ps {
+			list.remove(list.tail)
+			ret++
+		}
+	}
+	return ret
 }
 
 func (list *LinkedList) Clear() {
@@ -146,7 +292,33 @@ func (list *LinkedList) Range(ch <-chan struct{}) chan interface{} {
 	return vals
 }
 
-// Insert 插入链表成为下标为pos的node，如果pos为负数或0，则成为头部，如果pos>=len，则成为尾部
+func (list *LinkedList) LRange(from, to int64) []interface{} {
+	if from < -list.len {
+		from = 0
+	}
+	if from < 0 {
+		from += list.len
+	}
+	if to < -list.len {
+		to = 0
+	}
+	if to < 0 {
+		to += list.len
+	}
+	num := int(to - from + 1)
+	if num <= 0 {
+		return nil
+	}
+	ret := make([]interface{}, num)
+	n := list.index(from)
+	for i := 0; i < num; i++ {
+		ret[i] = n.val
+		n = n.next
+	}
+	return ret
+}
+
+// insert 插入链表成为下标为pos的node，如果pos为负数或0，则成为头部，如果pos>=len，则成为尾部
 func (list *LinkedList) insert(n *node, pos int64) {
 	defer func() { list.len++ }()
 	if list.Len() == 0 {
@@ -181,6 +353,22 @@ func (list *LinkedList) insert(n *node, pos int64) {
 	}
 }
 
+// insert 将n插入到p之前或之后，保证p一定是在list中的，如果after为true，表示插入后面，否则插前面
+func (list *LinkedList) insertAB(n *node, p *node, after bool) {
+	defer func() { list.len++ }()
+	if after {
+		fix(p, n, p.next, insertOp)
+		if p == list.tail {
+			list.tail = n
+		}
+	} else {
+		fix(p.prev, n, p, insertOp)
+		if p == list.head {
+			list.head = n
+		}
+	}
+}
+
 type node struct {
 	prev *node
 	next *node
@@ -190,7 +378,15 @@ type node struct {
 func NewLinkedList(val ...interface{}) *LinkedList {
 	list := &LinkedList{}
 	for i := range val {
-		list.Append(val[i])
+		list.PushTail(val[i])
+	}
+	return list
+}
+
+func NewRList(val ...string) base.RList {
+	list := &LinkedList{}
+	for i := range val {
+		list.PushTail(val[i])
 	}
 	return list
 }

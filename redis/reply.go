@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"bytes"
 	"code/regis/base"
 	"code/regis/lib/utils"
 	"fmt"
@@ -10,6 +11,22 @@ import (
 const (
 	nullBulkReplyBytes = "$-1"
 )
+
+func Equal(a base.Reply, b base.Reply) bool {
+	return bytes.Equal(a.Bytes(), b.Bytes())
+}
+
+func GetString(r base.Reply) string {
+	rb := r.Bytes()
+	return string(rb[1 : len(rb)-2])
+}
+
+func GetInt(r base.Reply) int {
+	rb := r.Bytes()
+	rs := string(rb[1 : len(rb)-2])
+	ri, _ := strconv.ParseInt(rs, 10, 64)
+	return int(ri)
+}
 
 // echoReply 用于回显命令的测试reply
 type echoReply struct {
@@ -94,7 +111,33 @@ func (r *arrayReply) Bytes() []byte {
 	return []byte(ret)
 }
 
-// mulReply 用于返回多行信息
+// interfacesReply 用于返回多行字符串信息
+type interfacesReply struct {
+	msg []interface{}
+}
+
+func InterfacesReply(q []interface{}) *interfacesReply {
+	return &interfacesReply{msg: q}
+}
+
+func (r *interfacesReply) Bytes() []byte {
+	if len(r.msg) == 0 {
+		return []byte("+(empty array)\r\n")
+	}
+	ret := fmt.Sprintf("%v%v%v", PrefixArray, len(r.msg), CRLF)
+	for i := 0; i < len(r.msg); i++ {
+		if r.msg[i] == nil {
+			ret += fmt.Sprintf("%v%v%v", PrefixBulk, -1, CRLF)
+		} else {
+			msgS := utils.InterfaceToString(r.msg[i])
+			ret += fmt.Sprintf("%v%v%v", PrefixBulk, len(msgS), CRLF)
+			ret += fmt.Sprintf("%v%v", msgS, CRLF)
+		}
+	}
+	return []byte(ret)
+}
+
+// mulReply 用于返回多行reply信息
 type multiReply struct {
 	r []base.Reply
 }
@@ -202,6 +245,22 @@ func (r *intReply) Bytes() []byte {
 	return []byte(ret)
 }
 
+// Int64Reply 返回一个数字
+type int64Reply struct {
+	num int64
+}
+
+func Int64Reply(num int64) *int64Reply {
+	return &int64Reply{
+		num: num,
+	}
+}
+
+func (r *int64Reply) Bytes() []byte {
+	ret := fmt.Sprintf("%v%v%v", PrefixInt, r.num, CRLF)
+	return []byte(ret)
+}
+
 // StrReply 返回一个字符串
 type strReply struct {
 	str string
@@ -241,4 +300,22 @@ var ParseErrReply = &parseErrReply{}
 
 func (r *parseErrReply) Bytes() []byte {
 	return []byte("-ERR parse Error occurred\r\n")
+}
+
+// typeErrReply 当对某个键操作一个不属于其类型的操作时报错，比如对一个string的key进行lpush
+type typeErrReply struct{}
+
+var TypeErrReply = &typeErrReply{}
+
+func (r *typeErrReply) Bytes() []byte {
+	return []byte("-WRONGTYPE Operation against a key holding the wrong kind of value\r\n")
+}
+
+// intErrReply 当输入一个值，它应当转化为int，但是因为太大或不是int而无法转发时报错
+type intErrReply struct{}
+
+var IntErrReply = &intErrReply{}
+
+func (r *intErrReply) Bytes() []byte {
+	return []byte("-ERR value is not an integer or out of range\r\n")
 }

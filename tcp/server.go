@@ -3,11 +3,13 @@ package tcp
 import (
 	"code/regis/base"
 	"code/regis/conf"
+	"code/regis/database"
 	"code/regis/ds"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -20,7 +22,12 @@ type replica struct {
 	slave  *ds.Dict // 用于存储slave的client, ip:port -> *Client
 	master *Client  // 用于存储master的client
 
+	masterReplOffset int64 // 当前节点作为master时，发出的offset
+	slaveReplOffset  int64 // 当前节点作为slave时，与master的同步offset
+
 	replPingSlavePeriod int // 给slave发心跳包的周期
+
+	ringbuffer io.ReadWriteSeeker
 }
 
 type Server struct {
@@ -57,6 +64,9 @@ func (s *Server) GetAddr() string {
 func (s *Server) GetDB() base.DB {
 	return s.db
 }
+func (s *Server) FlushDB() {
+	s.SetDB(database.NewMultiDB())
+}
 func (s *Server) SetDB(db base.DB) {
 	s.db = db
 }
@@ -85,6 +95,16 @@ tcp_port:%v
 	return fmt.Sprintf(serverInfo, s.replid, port)
 }
 
+//func (s *Server)loadRDB() {
+//	s.FlushDB()
+//	query := file.LoadRDB(conf.Conf.RDBName)
+//	for i := range query {
+//		client.Send(redis.CmdReply(query[i]))
+//		_, _ = client.RecvAll()
+//	}
+//	//client.Close()
+//}
+
 func InitServer(prop *conf.RegisConf) *Server {
 	server := &Server{}
 	server.replid = utils.GetRandomHexChars(40)
@@ -103,6 +123,8 @@ func InitServer(prop *conf.RegisConf) *Server {
 	server.slave = ds.NewDict(8)
 
 	server.replPingSlavePeriod = 10
+
+	//server.ringbuffer = io.ReadWriteSeeker()
 
 	go server.closeClient()
 	return server
@@ -132,7 +154,7 @@ func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 	c := initConnection(conn, s)
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.list.Append(c)
+	s.list.PushTail(c)
 	//log.Debug("get client now is %v", s.list.Len())
 }
 
