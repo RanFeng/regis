@@ -6,20 +6,19 @@ import (
 
 func sdbInit() {
 	// string
-	RegCmdInfo("set", -3, base.CmdWrite|base.CmdDenyOom, Set)
-	RegCmdInfo("get", 2, base.CmdReadOnly, Get)
-	RegCmdInfo("mset", -3, base.CmdWrite, MSet)
-	RegCmdInfo("mget", -2, base.CmdReadOnly, MGet)
-	//base.RegCmdInfo("mget", -2, base.CmdLevelSDB, database.MGet)
-	RegCmdInfo("del", -2, base.CmdWrite, Del)
-	RegCmdInfo("dbsize", 1, base.CmdReadOnly, DBSize)
+	RegCmdInfo("set", Set, -3, base.CmdWrite|base.CmdDenyOom)
+	RegCmdInfo("get", Get, 2, base.CmdReadOnly)
+	RegCmdInfo("mset", MSet, -3, base.CmdWrite)
+	RegCmdInfo("mget", MGet, -2, base.CmdReadOnly)
+	RegCmdInfo("del", Del, -2, base.CmdWrite)
+	RegCmdInfo("dbsize", DBSize, 1, base.CmdReadOnly)
 
 	// list
-	RegCmdInfo("lpush", -3, base.CmdWrite, LPush)
-	RegCmdInfo("rpush", -3, base.CmdWrite, RPush)
-	RegCmdInfo("lpushx", -3, base.CmdWrite, LPushX)
-	RegCmdInfo("rpushx", -3, base.CmdWrite, RPushX)
-	RegCmdInfo("lrange", 4, base.CmdReadOnly, LRange)
+	RegCmdInfo("lpush", LPush, -3, base.CmdWrite)
+	RegCmdInfo("rpush", RPush, -3, base.CmdWrite)
+	RegCmdInfo("lpushx", LPushX, -3, base.CmdWrite)
+	RegCmdInfo("rpushx", RPushX, -3, base.CmdWrite)
+	RegCmdInfo("lrange", LRange, 4, base.CmdReadOnly)
 }
 
 func mdbInit() {
@@ -27,19 +26,19 @@ func mdbInit() {
 }
 
 func serverInit() {
-	RegCmdInfo("ping", -1, base.CmdAdmin, Ping)
-	RegCmdInfo("select", 2, base.CmdLoading, Select)
-	RegCmdInfo("save", 1, base.CmdAdmin, Save)
-	RegCmdInfo("bgsave", 1, base.CmdAdmin, BGSave)
-	RegCmdInfo("publish", 3, base.CmdPubSub, Publish)
-	RegCmdInfo("subscribe", -2, base.CmdPubSub, Subscribe)
-	RegCmdInfo("unsubscribe", -2, base.CmdPubSub, UnSubscribe)
+	RegCmdInfo("ping", Ping, -1, base.CmdAdmin)
+	RegCmdInfo("select", Select, 2, base.CmdWrite|base.CmdLoading)
+	RegCmdInfo("save", Save, 1, base.CmdAdmin)
+	RegCmdInfo("bgsave", BGSave, 1, base.CmdAdmin)
+	RegCmdInfo("publish", Publish, 3, base.CmdPubSub)
+	RegCmdInfo("subscribe", Subscribe, -2, base.CmdPubSub)
+	RegCmdInfo("unsubscribe", UnSubscribe, -2, base.CmdPubSub)
 
 	// 主从
-	RegCmdInfo("replicaof", 3, base.CmdAdmin, ReplicaOf)
-	RegCmdInfo("info", -1, base.CmdAdmin, Info)
-	RegCmdInfo("replconf", -3, base.CmdAdmin, ReplConf)
-	RegCmdInfo("psync", 3, base.CmdAdmin, PSync)
+	RegCmdInfo("replicaof", ReplicaOf, 3, base.CmdAdmin)
+	RegCmdInfo("info", Info, -1, base.CmdAdmin)
+	RegCmdInfo("replconf", ReplConf, -3, base.CmdAdmin)
+	RegCmdInfo("psync", PSync, 3, base.CmdAdmin)
 }
 
 func ServerInit() {

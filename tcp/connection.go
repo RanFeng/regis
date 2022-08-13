@@ -7,6 +7,7 @@ import (
 	"code/regis/lib/utils"
 	"code/regis/redis"
 	"net"
+	"time"
 )
 
 type Command struct {
@@ -16,18 +17,27 @@ type Command struct {
 	Err   error
 }
 
+// RegisConn
+// - 用于管理客户端来的连接
+// RegisClient 与 RegisConn 的区别是：
+// RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
+// RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
 type RegisConn struct {
 	ID   int64
 	Conn net.Conn
+
+	// 一般来说都是 base.ConnNormal 的状态
+	// 当 RegisConn 作为从库，且正在与主库进行rdb同步时，状态为 base.ConnSync
+	Status int
 
 	server *RegisServer
 
 	//name      string // 客户端名字
 	DBIndex int // 客户端连上的db_index
 
-	//closeChan chan<- int64
-	//workChan  chan<- *base.Command
 	doneChan chan *Command
+
+	lastBeat time.Time
 
 	// 存储客户端订阅的频道
 	PubsubList    *ds.LinkedList
@@ -41,7 +51,7 @@ func (c *RegisConn) RemoteAddr() string {
 func (c *RegisConn) Close() {
 	log.Info("connection close")
 	c.UnSubscribeAll()
-	c.server.closeChan <- utils.GetConnFd(c.Conn)
+	c.server.closeClient(utils.GetConnFd(c.Conn))
 }
 
 func (c *RegisConn) UnSubscribeAll() {
@@ -69,11 +79,12 @@ func (c *RegisConn) UnSubscribeAll() {
 	}
 }
 
-func (c *RegisConn) Write(b []byte) {
+func (c *RegisConn) Write(b []byte) error {
 	_, err := c.Conn.Write(b)
 	if err != nil {
 		c.Close()
 	}
+	return err
 }
 
 func (c *RegisConn) Reply(reply base.Reply) {
@@ -102,6 +113,7 @@ func (c *RegisConn) Handle() {
 			c.Close()
 			return
 		}
+		c.lastBeat = time.Now()
 		cmd := &Command{
 			Conn:  c,
 			Query: pc.Query,

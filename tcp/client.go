@@ -15,10 +15,17 @@ import (
 	"time"
 )
 
+// RegisClient
+// - fake client，用于加载rdb
+// - master client，用于与主库交流
+// RegisClient 与 RegisConn 的区别是：
+// RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
+// RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
 type RegisClient struct {
-	server *RegisServer
-	conn   net.Conn
-	addr   string // server addr
+	server   *RegisServer
+	conn     net.Conn
+	addr     string // server addr
+	lastBeat time.Time
 }
 
 func (cli *RegisClient) GetConn() net.Conn {
@@ -27,6 +34,10 @@ func (cli *RegisClient) GetConn() net.Conn {
 
 func (cli *RegisClient) Send(reply base.Reply) {
 	_, _ = cli.conn.Write(reply.Bytes())
+}
+
+func (cli *RegisClient) Write(msg []byte) {
+	_, _ = cli.conn.Write(msg)
 }
 
 func (cli *RegisClient) Close() {

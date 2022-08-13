@@ -21,14 +21,11 @@ type MultiDB struct {
 	sDB []*SingleDB
 }
 
-//func (md *MultiDB) Exec(cmd *base.Command) base.Reply {
-//	ci, _ := base.GetCmdInfo(cmd.Query[0])
-//	if ci.Level(base.CmdLevelMDB) {
-//		return redis.NilReply
-//	}
-//	sdb := md.GetSDB(cmd.Conn.GetDBIndex())
-//	return sdb.Exec(cmd)
-//}
+func (md *MultiDB) Flush() {
+	for i := range md.sDB {
+		md.sDB[i].Flush()
+	}
+}
 
 func (md *MultiDB) SetStatus(status base.WorldStatus) {
 	md.status = status

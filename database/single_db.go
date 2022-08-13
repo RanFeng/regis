@@ -15,12 +15,6 @@ const (
 	expireDictSize = 1 << 10
 )
 
-type SDBRealFunc func(db *SingleDB, args []string) base.Reply
-
-func GetSDBReal(exec interface{}) SDBRealFunc {
-	return exec.(func(db *SingleDB, args []string) base.Reply)
-}
-
 type carrier struct {
 	// 实际存储的数据，key -> Data
 	data *ds.Dict
@@ -245,6 +239,18 @@ func (sdb *SingleDB) RemoveData(keys ...string) int {
 func (sdb *SingleDB) NotifyMoving(i int) {
 	for sdb.bgDB.data.Len() > 0 {
 		base.NeedMoving <- i
+	}
+	sdb.status = base.WorldNormal
+}
+
+func (sdb *SingleDB) Flush() {
+	sdb.db = &carrier{
+		data:   ds.NewDict(dataDictSize),
+		expire: ds.NewDict(expireDictSize),
+	}
+	sdb.bgDB = &carrier{
+		data:   ds.NewDict(dataDictSize >> 10),
+		expire: ds.NewDict(expireDictSize >> 10),
 	}
 	sdb.status = base.WorldNormal
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"code/regis/base"
 	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"errors"
 	"io"
 	"strconv"
@@ -167,7 +168,7 @@ func parse0(r *bufio.Reader) (int, []string, error) {
 		case PrefixErr[0], PrefixStr[0], PrefixInt[0]:
 			return lens, []string{string(msg[1 : len(msg)-2])}, nil
 		default:
-			log.Error("maybe binary input stream")
+			log.Error("maybe binary input stream %v", utils.BytesViz(msg))
 		}
 	}
 }

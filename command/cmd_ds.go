@@ -18,7 +18,7 @@ type cmdInfo struct {
 	exec   ExecFunc
 }
 
-func RegCmdInfo(name string, arity, sflags int, exec ExecFunc) {
+func RegCmdInfo(name string, exec ExecFunc, arity, sflags int) {
 	name = strings.ToLower(name)
 	CmdTable[name] = &cmdInfo{
 		name:   name,

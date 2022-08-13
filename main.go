@@ -18,17 +18,21 @@ func Executor() {
 
 		select {
 		case cmd := <-tcp.Server.GetWorkChan():
-			log.Info("query %v", cmd.Query)
+			log.Info("get %v", cmd.Query)
 			if len(cmd.Query) == 0 {
 				cmd.Reply = redis.NilReply
 			} else {
-				handler, ok := command.GetCmdInfo(cmd.Query[0])
+				cmdInfo, ok := command.GetCmdInfo(cmd.Query[0])
 				if !ok {
+					log.Error("command not found %v", cmd.Query)
 					cmd.Reply = redis.UnknownCmdErrReply(cmd.Query[0])
-				} else if !handler.Validate(cmd.Query) {
+				} else if !cmdInfo.Validate(cmd.Query) {
 					cmd.Reply = redis.ArgNumErrReply(cmd.Query[0])
 				} else {
-					cmd.Reply = handler.Exec(tcp.Server, cmd.Conn, cmd.Query)
+					cmd.Reply = cmdInfo.Exec(tcp.Server, cmd.Conn, cmd.Query)
+					if cmdInfo.HasAttr(base.CmdWrite) {
+						tcp.Server.SyncSlave(redis.CmdSReply(cmd.Query...).Bytes())
+					}
 				}
 			}
 			cmd.Conn.CmdDone(cmd)

@@ -13,6 +13,11 @@ const (
 	WorldStopped        // 此时主线下不再执行任何命令，比如save命令发生时
 )
 
+const (
+	ConnNormal = iota
+	ConnSync
+)
+
 // DB 面向server的DB模型
 type DB interface {
 	SetStatus(status WorldStatus)
@@ -21,6 +26,7 @@ type DB interface {
 	GetSDB(i int) SDB
 	FreshNormal()
 	SaveRDB(rdb *core.Encoder) error
+	Flush()
 }
 
 // SDB 面向命令的DB模型
@@ -32,6 +38,7 @@ type SDB interface {
 	GetData(key string) (interface{}, bool)
 	RemoveData(keys ...string) int
 	NotifyMoving(i int)
+	Flush()
 	MoveData()
 	Size() int
 	ShadowSize() int

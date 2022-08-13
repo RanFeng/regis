@@ -189,6 +189,9 @@ func (list *LinkedList) remove(n *node) {
 
 func (list *LinkedList) RemoveFirst(cmp func(interface{}) bool) interface{} {
 	n := list.find(cmp)
+	if n == nil {
+		return nil
+	}
 	list.remove(n)
 	return n.val
 }

@@ -6,12 +6,12 @@ import (
 	"code/regis/ds"
 	"code/regis/file"
 	log "code/regis/lib"
-	"code/regis/lib/utils"
 	"code/regis/redis"
 	"code/regis/tcp"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const (
@@ -163,9 +163,11 @@ func ReplConf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.
 	subCmd := strings.ToLower(args[1])
 	switch subCmd {
 	case "listening-port":
-		ip, _ := utils.ParseAddr(conn.RemoteAddr())
-		cli := tcp.MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
-		server.Slave.Put(conn.RemoteAddr(), cli)
+		//ip, _ := utils.ParseAddr(conn.RemoteAddr())
+		//cli := tcp.MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
+		//server.Slave.Put(conn.RemoteAddr(), cli)
+		//go server.HeartBeatFromSlave()
+		return redis.OkReply
 	case "capa":
 		return redis.OkReply
 	case "ack":
@@ -176,10 +178,21 @@ func ReplConf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.
 
 func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
 	if args[1] != server.Replid {
-		// todo begin bgsave
 		go func() {
+			conn.Status = base.ConnSync
+			go func() {
+				for conn.Status == base.ConnSync {
+					err := conn.Write([]byte{'\n'})
+					if err != nil {
+						return
+					}
+					time.Sleep(time.Duration(server.ReplPingSlavePeriod) * time.Second)
+				}
+			}()
 			file.SaveRDB(server.DB.SaveRDB) //nolint:errcheck
 			file.SendRDB("dump.rdb", conn.Conn)
+			server.Slave.Put(conn.RemoteAddr(), conn)
+			conn.Status = base.ConnNormal
 		}()
 		log.Info("not replid, need full sync")
 		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.Replid, server.MasterReplOffset))

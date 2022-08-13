@@ -15,6 +15,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 )
@@ -45,7 +46,7 @@ const (
 type replica struct {
 	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	Replid string
-	Slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisClient
+	Slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisConn
 	Master *RegisClient // 用于存储master的client
 
 	// 当前节点作为master时，往缓冲区存进去的字节数
@@ -71,10 +72,9 @@ type replica struct {
 
 type RegisServer struct {
 	replica
-	lock      sync.Mutex          // 对list操作的锁
-	semp      *semaphore.Weighted // 用于控制最大客户端连接数量
-	list      *ds.LinkedList      // 存储已连接的connection
-	closeChan chan int64          // 用于监听conn的断连，close时就将client从list中删除se可连接的信号量+1
+	lock sync.Mutex          // 对list操作的锁
+	semp *semaphore.Weighted // 用于控制最大客户端连接数量
+	list *ds.LinkedList      // 存储已连接的connection
 
 	// DB 是服务端的主数据库
 	DB base.DB
@@ -98,10 +98,56 @@ func (s *RegisServer) FlushDB() {
 }
 
 func (s *RegisServer) LoadRDB(fn string) {
-	s.FlushDB()
+	s.DB.Flush()
 	query := file.LoadRDB(fn)
 	for i := range query {
 		Client.Send(redis.CmdReply(query[i]...))
+	}
+}
+
+func (s *RegisServer) SyncSlave(msg []byte) {
+	if s.Slave.Len() == 0 {
+		return
+	}
+	ch := make(chan struct{})
+	defer close(ch)
+	s.MasterReplOffset += int64(len(msg))
+	for kv := range s.Slave.RangeKV(ch) {
+		cli := kv.Val.(*RegisConn)
+		log.Debug("write cmd to slave %v %v", kv.Key, cli.RemoteAddr())
+		cli.Write(msg)
+	}
+}
+
+func (s *RegisServer) HeartBeatToSlave() {
+	ch := make(chan struct{})
+	ping := redis.CmdReply("ping").Bytes()
+	for {
+		if s.Slave.Len() > 0 {
+			Server.MasterReplOffset += int64(len(ping))
+		}
+		for kv := range s.Slave.RangeKV(ch) {
+			cli := kv.Val.(*RegisConn)
+			cli.Write(ping)
+			//cli.Send(redis.CmdReply("set", "A", "1ppp"))
+			log.Debug("ping to cli %v", cli.RemoteAddr())
+		}
+		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
+	}
+}
+
+func (s *RegisServer) HeartBeatFromSlave() {
+	ch := make(chan struct{})
+	for {
+		for kv := range s.Slave.RangeKV(ch) {
+			cli := kv.Val.(*RegisConn)
+			if time.Since(cli.lastBeat) > time.Minute {
+				log.Error("MASTER <-> REPLICA sync timeout")
+				s.Slave.Del(kv.Key)
+				cli.Close()
+			}
+		}
+		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
 	}
 }
 
@@ -129,7 +175,7 @@ run_id:%v
 tcp_port:%v
 `
 	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.Replid, s.Slave.Len(), s.MasterReplOffset, s.SlaveReplOffset, s.Replid, port)
+	return fmt.Sprintf(serverInfo, s.Role, s.Slave.Len(), s.MasterReplOffset, s.SlaveReplOffset, s.Replid, port)
 }
 
 func InitServer(prop *conf.RegisConf) *RegisServer {
@@ -143,7 +189,6 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
 	server.workChan = make(chan *Command)
-	server.closeChan = make(chan int64)
 
 	server.pubsubDict = ds.NewDict(128)
 	server.pubsubPattern = ds.NewLinkedList()
@@ -154,22 +199,24 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 
 	//server.ringbuffer = io.ReadWriteSeeker()
 
-	go server.closeClient()
+	go server.HeartBeatToSlave()
+	go server.HeartBeatFromSlave()
 	return server
 }
 
-func (s *RegisServer) closeClient() {
-	for {
-		id := <-s.closeChan
-		log.Debug("server close Conn %v", id)
-		c := s.list.RemoveFirst(func(conn interface{}) bool {
-			//sid := utils.GetConnFd(Conn.(*RegisConn).Conn)
-			sid := conn.(*RegisConn).ID
-			return sid == id
-		})
-		_ = c.(*RegisConn).Conn.Close()
-		s.semp.Release(1)
+func (s *RegisServer) closeClient(id int64) {
+	log.Debug("server close Conn %v %v", id, s.list.Len())
+	c := s.list.RemoveFirst(func(conn interface{}) bool {
+		sid := conn.(*RegisConn).ID
+		return sid == id
+	})
+	if c == nil {
+		return
 	}
+	_ = c.(*RegisConn).Conn.Close()
+	s.Slave.Del(c.(*RegisConn).RemoteAddr())
+	s.semp.Release(1)
+	log.Debug("after close conn %v", s.list.Len())
 }
 
 func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
