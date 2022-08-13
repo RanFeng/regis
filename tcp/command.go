@@ -172,6 +172,10 @@ func ReplConf(server *RegisServer, conn base.Conn, args []string) base.Reply {
 		ip, _ := utils.ParseAddr(conn.RemoteAddr())
 		cli := MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
 		server.slave.Put(conn.RemoteAddr(), cli)
+	case "capa":
+		return redis.OkReply
+	case "ack":
+		return nil
 	}
 	return redis.OkReply
 }
@@ -179,9 +183,12 @@ func ReplConf(server *RegisServer, conn base.Conn, args []string) base.Reply {
 func PSync(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	if args[1] != server.replid {
 		// todo begin bgsave
-		go file.SaveRDB(server.GetDB().SaveRDB) //nolint:errcheck
+		go func() {
+			file.SaveRDB(server.GetDB().SaveRDB)
+			file.SendRDB("dump.rdb", conn.GetConn())
+		}()
 		log.Info("not replid, need full sync")
-		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.replid, 0))
+		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.replid, server.masterReplOffset))
 	}
 	sInfo := server.GetInfo()
 	return redis.StrReply(sInfo)

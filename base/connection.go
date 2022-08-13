@@ -1,5 +1,7 @@
 package base
 
+import "net"
+
 type WorldStatus int
 
 const (
@@ -13,7 +15,9 @@ const (
 type Conn interface {
 	Handle()
 	Close()
+	Write(b []byte)
 	Reply(reply Reply)
+	GetConn() net.Conn
 	GetID() int64
 	GetDBIndex() int
 	SetDBIndex(int)

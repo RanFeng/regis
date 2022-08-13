@@ -49,8 +49,25 @@ func (c *RegisConn) Close() {
 	c.server.closeChan <- utils.GetConnFd(c.conn)
 }
 
+func (c *RegisConn) GetConn() net.Conn {
+	return c.conn
+}
+
+func (c *RegisConn) Write(b []byte) {
+	_, err := c.conn.Write(b)
+	if err != nil {
+		c.Close()
+	}
+}
+
 func (c *RegisConn) Reply(reply base.Reply) {
-	_, _ = c.conn.Write(reply.Bytes())
+	if reply == nil {
+		return
+	}
+	_, err := c.conn.Write(reply.Bytes())
+	if err != nil {
+		c.Close()
+	}
 }
 
 func (c *RegisConn) Handle() {
@@ -83,7 +100,8 @@ func (c *RegisConn) Handle() {
 			return
 		}
 		//log.Debug("cmd is done %v", cmd.Reply.Bytes())
-		_, _ = c.conn.Write(doneCMD.Reply.Bytes())
+		c.Reply(doneCMD.Reply)
+		//_, _ = c.conn.Write(doneCMD.Reply.Bytes())
 		//c.Reply(doneCMD.Reply)
 	}
 }

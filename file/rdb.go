@@ -2,6 +2,8 @@ package file
 
 import (
 	log "code/regis/lib"
+	"code/regis/redis"
+	"fmt"
 	"io"
 	"os"
 	"time"
@@ -132,4 +134,46 @@ func SaveFile(fn string, conn io.Reader, size int) error {
 	}
 	//log.Info("接收文件完成")
 	return nil
+}
+
+func SendRDB(fn string, conn io.Writer) {
+	start := time.Now().UnixNano()
+	defer func() {
+		end := time.Now().UnixNano()
+		log.Info("rdb send from %v: %.3f seconds", fn, float64(end-start)/float64(time.Second))
+	}()
+	rdbFile, err := os.Open(fn)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return
+		}
+		panic("open dump.rdb failed")
+	}
+	defer func() {
+		_ = rdbFile.Close()
+	}()
+	fp, _ := rdbFile.Stat()
+	head := fmt.Sprintf("%v%v%v", redis.PrefixBulk, fp.Size(), redis.CRLF)
+	_, err = conn.Write([]byte(head))
+	if err != nil {
+		fmt.Println("conn.Write err:", err)
+		return
+	}
+	buf := make([]byte, 4096)
+	for {
+		n, err := rdbFile.Read(buf)
+		if err == io.EOF {
+			fmt.Println("文件读取完毕")
+			return
+		}
+		if err != nil {
+			fmt.Println("file.Read err:", err)
+			return
+		}
+		_, err = conn.Write(buf[:n])
+		if err != nil {
+			fmt.Println("conn.Write err:", err)
+			return
+		}
+	}
 }
