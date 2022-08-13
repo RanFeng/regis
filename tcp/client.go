@@ -104,9 +104,13 @@ func (cli *RegisClient) Handler() {
 	LoadRDB(cli.server, nil, nil)
 	cli.server.replid = syncInfo[1]
 	cli.server.role = RoleSlave
+	offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
+	if err != nil {
+		log.Error("get syncInfo offset fail, err %v", syncInfo)
+	}
+	Server.masterReplOffset = offset
+	Server.slaveReplOffset = offset
 	log.Info("slave to %v", cli.server.replid)
-	//cli.server.addClient(ctx, cli.conn)
-	//log.Info("size %v", rdbSize)
 
 	// 1. 阻塞读conn中的信息
 	// 2. 解析conn中的信息为payload
@@ -126,13 +130,11 @@ func (cli *RegisClient) Handler() {
 			return
 		}
 		Server.slaveReplOffset += int64(pc.Size)
+		Server.masterReplOffset += int64(pc.Size)
 		selfClient.Send(redis.CmdSReply(pc.Query...))
 		reply := selfClient.Reply()
-		//cli.conn.Write(cmd.Reply.Bytes())
 		log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
-		//_, _ = cli.conn.Write(reply)
 		cli.Send(redis.CmdReply("REPLCONF", "ACK", Server.slaveReplOffset))
-
 	}
 }
 func NewClient(addr string, server *RegisServer) (*RegisClient, error) {

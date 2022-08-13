@@ -46,8 +46,21 @@ type replica struct {
 	slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisClient
 	master *RegisClient // 用于存储master的client
 
-	masterReplOffset int64 // 当前节点作为master时，发出的offset
-	slaveReplOffset  int64 // 当前节点作为slave时，与master的同步offset
+	// 当前节点作为master时，往缓冲区存进去的字节数
+	// 如果不是主从结构，写命令来时不会增加
+	// 如果是主从结构，且自己是master，将用户命令写入缓冲区并进行计数
+	//	如果一个slave来要求全量同步，发出 fullsync replid masterReplOffset，并发出rdb文件
+	//	表示："我发给你的rdb文件同步进度是 masterReplOffset"
+	//  如果自己是slave，在改变 slaveReplOffset 的时候，也要同时改变 masterReplOffset
+	//  因为谁也不知道会不会在后面，有新的slave认领该服务器为master
+	// TODO 如果是部分同步呢
+	masterReplOffset int64
+
+	// 当前节点作为slave时，与master的同步offset
+	// 收到 fullsync id offset 之后，会收到一个rdb文件，将rdb load到db中之后
+	// 令 slaveReplOffset = offset
+	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
+	slaveReplOffset int64
 
 	replPingSlavePeriod int // 给slave发心跳包的周期
 
@@ -115,13 +128,13 @@ func (s *RegisServer) GetInfo() string {
 	serverInfo := `# RegisServer
 role:%v
 connected_slaves:%v
-redis_version:6.2.5
-redis_mode:standalone
+master_repl_offset:%v
+slave_repl_offset:%v
 run_id:%v
 tcp_port:%v
 `
 	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.role, s.slave.Len(), s.replid, port)
+	return fmt.Sprintf(serverInfo, s.role, s.slave.Len(), s.masterReplOffset, s.slaveReplOffset, s.replid, port)
 }
 
 func InitServer(prop *conf.RegisConf) *RegisServer {

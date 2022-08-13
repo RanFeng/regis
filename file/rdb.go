@@ -122,7 +122,7 @@ func SaveFile(fn string, conn io.Reader, size int) error {
 		file.Write(buf[:n])
 		if err != nil {
 			if err == io.EOF {
-				log.Info("接收文件完成")
+				//log.Info("接收文件完成")
 				return nil
 			}
 			log.Error("conn.Read()方法执行出错，错误为:%v\n", err)
@@ -130,6 +130,6 @@ func SaveFile(fn string, conn io.Reader, size int) error {
 		}
 		size -= n
 	}
-	log.Info("接收文件完成")
+	//log.Info("接收文件完成")
 	return nil
 }
