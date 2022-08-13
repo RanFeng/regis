@@ -4,7 +4,6 @@ import (
 	"code/regis/base"
 	"code/regis/ds"
 	log "code/regis/lib"
-	"code/regis/redis"
 	"time"
 
 	"github.com/hdt3213/rdb/core"
@@ -56,15 +55,6 @@ func (sdb *SingleDB) SetStatus(status base.WorldStatus) {
 
 func (sdb *SingleDB) GetStatus() base.WorldStatus {
 	return sdb.status
-}
-
-func (sdb *SingleDB) Exec(cmd *base.Command) base.Reply {
-	args := cmd.Query
-	handler, _ := base.GetCmdInfo(args[0])
-	if !handler.Level(base.CmdLevelSDB) {
-		return redis.NilReply
-	}
-	return GetSDBReal(handler.GetExec())(sdb, args)
 }
 
 func (sdb *SingleDB) RangeKV(ch <-chan struct{}) chan base.DBKV {

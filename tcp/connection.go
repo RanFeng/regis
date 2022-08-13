@@ -9,52 +9,68 @@ import (
 	"net"
 )
 
+type Command struct {
+	Conn  *RegisConn
+	Query []string
+	Reply base.Reply
+	Err   error
+}
+
 type RegisConn struct {
-	id   int64
-	conn net.Conn
+	ID   int64
+	Conn net.Conn
 
 	server *RegisServer
 
 	//name      string // 客户端名字
-	selectedDB int // 客户端连上的db_index
+	DBIndex int // 客户端连上的db_index
 
 	//closeChan chan<- int64
 	//workChan  chan<- *base.Command
-	doneChan chan *base.Command
+	doneChan chan *Command
 
 	// 存储客户端订阅的频道
-	pubsubList    *ds.LinkedList
-	pubsubPattern *ds.LinkedList
+	PubsubList    *ds.LinkedList
+	PubsubPattern *ds.LinkedList
 }
 
 func (c *RegisConn) RemoteAddr() string {
-	return c.conn.RemoteAddr().String()
-}
-
-func (c *RegisConn) GetID() int64 {
-	return c.id
-}
-
-func (c *RegisConn) GetDBIndex() int {
-	return c.selectedDB
-}
-
-func (c *RegisConn) SetDBIndex(i int) {
-	c.selectedDB = i
+	return c.Conn.RemoteAddr().String()
 }
 
 func (c *RegisConn) Close() {
 	log.Info("connection close")
-	UnSubscribe(c.server, c, []string{"unsubscribe"})
-	c.server.closeChan <- utils.GetConnFd(c.conn)
+	c.UnSubscribeAll()
+	c.server.closeChan <- utils.GetConnFd(c.Conn)
 }
 
-func (c *RegisConn) GetConn() net.Conn {
-	return c.conn
+func (c *RegisConn) UnSubscribeAll() {
+	dict := c.server.GetPubSub()
+	args := make([]string, 0, c.PubsubList.Len())
+
+	ch := make(chan struct{})
+	for val := range c.PubsubList.Range(ch) {
+		args = append(args, val.(string))
+	}
+
+	for i := 1; i < len(args); i++ {
+		// 获取server的订阅dict
+		if val, ok := dict.Get(args[i]); ok {
+			// 将conn从server的订阅list中删除
+			val.(base.LList).RemoveFirst(func(conn interface{}) bool {
+				return c.ID == conn.(*RegisConn).ID
+			})
+		}
+
+		// conn自己更新自己的订阅list，取消订阅该频道
+		c.PubsubList.RemoveFirst(func(s interface{}) bool {
+			return args[i] == s.(string)
+		})
+	}
 }
 
 func (c *RegisConn) Write(b []byte) {
-	_, err := c.conn.Write(b)
+	_, err := c.Conn.Write(b)
 	if err != nil {
 		c.Close()
 	}
@@ -64,7 +80,7 @@ func (c *RegisConn) Reply(reply base.Reply) {
 	if reply == nil {
 		return
 	}
-	_, err := c.conn.Write(reply.Bytes())
+	_, err := c.Conn.Write(reply.Bytes())
 	if err != nil {
 		c.Close()
 	}
@@ -77,7 +93,7 @@ func (c *RegisConn) Handle() {
 	// 4. 等主线程完成再回到1
 
 	// 1. 2. 3. 解析客户端的命令并放入workChan中
-	pC := redis.Parse(c.conn)
+	pC := redis.Parse(c.Conn)
 	for {
 		// 阻塞获取payload
 		pc := <-pC
@@ -86,7 +102,7 @@ func (c *RegisConn) Handle() {
 			c.Close()
 			return
 		}
-		cmd := &base.Command{
+		cmd := &Command{
 			Conn:  c,
 			Query: pc.Query,
 		}
@@ -99,37 +115,23 @@ func (c *RegisConn) Handle() {
 			c.Close()
 			return
 		}
-		//log.Debug("cmd is done %v", cmd.Reply.Bytes())
 		c.Reply(doneCMD.Reply)
-		//_, _ = c.conn.Write(doneCMD.Reply.Bytes())
-		//c.Reply(doneCMD.Reply)
 	}
 }
 
-func (c *RegisConn) CmdDone(cmd *base.Command) {
+func (c *RegisConn) CmdDone(cmd *Command) {
 	c.doneChan <- cmd
 }
 
-func (c *RegisConn) NSubChannel() base.LList {
-	return c.pubsubList
-}
-func (c *RegisConn) PSubChannel() base.LList {
-	return c.pubsubPattern
-}
-
 func initConnection(conn net.Conn, server *RegisServer) *RegisConn {
-	log.Debug("get conn client %v", utils.GetConnFd(conn))
+	log.Debug("get Conn client %v", utils.GetConnFd(conn))
 	c := &RegisConn{
-		id:   utils.GetConnFd(conn),
-		conn: conn,
-
-		server: server,
-		//closeChan: server.closeChan,
-		//workChan:  server.workChan,
-		doneChan: make(chan *base.Command),
-
-		pubsubList:    ds.NewLinkedList(),
-		pubsubPattern: ds.NewLinkedList(),
+		ID:            utils.GetConnFd(conn),
+		Conn:          conn,
+		server:        server,
+		doneChan:      make(chan *Command),
+		PubsubList:    ds.NewLinkedList(),
+		PubsubPattern: ds.NewLinkedList(),
 	}
 	go c.Handle()
 	return c

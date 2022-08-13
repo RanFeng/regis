@@ -5,8 +5,10 @@ import (
 	"code/regis/conf"
 	"code/regis/database"
 	"code/regis/ds"
+	"code/regis/file"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
+	"code/regis/redis"
 	"context"
 	"fmt"
 	"io"
@@ -41,10 +43,10 @@ const (
 )
 
 type replica struct {
-	role   RoleType // RoleMaster -> master, RoleSlave -> slave
-	replid string
-	slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisClient
-	master *RegisClient // 用于存储master的client
+	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
+	Replid string
+	Slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisClient
+	Master *RegisClient // 用于存储master的client
 
 	// 当前节点作为master时，往缓冲区存进去的字节数
 	// 如果不是主从结构，写命令来时不会增加
@@ -54,17 +56,17 @@ type replica struct {
 	//  如果自己是slave，在改变 slaveReplOffset 的时候，也要同时改变 masterReplOffset
 	//  因为谁也不知道会不会在后面，有新的slave认领该服务器为master
 	// TODO 如果是部分同步呢
-	masterReplOffset int64
+	MasterReplOffset int64
 
 	// 当前节点作为slave时，与master的同步offset
-	// 收到 fullsync id offset 之后，会收到一个rdb文件，将rdb load到db中之后
+	// 收到 fullsync ID offset 之后，会收到一个rdb文件，将rdb load到db中之后
 	// 令 slaveReplOffset = offset
 	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
-	slaveReplOffset int64
+	SlaveReplOffset int64
 
-	replPingSlavePeriod int // 给slave发心跳包的周期
+	ReplPingSlavePeriod int // 给slave发心跳包的周期
 
-	ringbuffer io.ReadWriteSeeker
+	Ringbuffer io.ReadWriteSeeker
 }
 
 type RegisServer struct {
@@ -74,12 +76,12 @@ type RegisServer struct {
 	list      *ds.LinkedList      // 存储已连接的connection
 	closeChan chan int64          // 用于监听conn的断连，close时就将client从list中删除se可连接的信号量+1
 
-	// db 是服务端的主数据库
-	db base.DB
+	// DB 是服务端的主数据库
+	DB base.DB
 
-	workChan chan *base.Command // 用于给主协程输送命令的
+	workChan chan *Command // 用于给主协程输送命令的
 
-	// 保存所有频道的订阅关系 channel -> list(base.Conn)
+	// 保存所有频道的订阅关系 channel -> list(base.Connection)
 	pubsubDict    *ds.Dict
 	pubsubPattern *ds.LinkedList
 
@@ -87,30 +89,26 @@ type RegisServer struct {
 	maxClients int64
 }
 
-func (s *RegisServer) GetReplid() string {
-	return s.replid
-}
-
-func (s *RegisServer) SetReplid(id string) {
-	s.replid = id
-}
-
 func (s *RegisServer) GetAddr() string {
 	return s.address
 }
-func (s *RegisServer) GetDB() base.DB {
-	return s.db
-}
+
 func (s *RegisServer) FlushDB() {
-	s.SetDB(database.NewMultiDB())
+	s.DB = database.NewMultiDB()
 }
-func (s *RegisServer) SetDB(db base.DB) {
-	s.db = db
+
+func (s *RegisServer) LoadRDB(fn string) {
+	s.FlushDB()
+	query := file.LoadRDB(fn)
+	for i := range query {
+		Client.Send(redis.CmdReply(query[i]...))
+	}
 }
-func (s *RegisServer) GetWorkChan() <-chan *base.Command {
+
+func (s *RegisServer) GetWorkChan() <-chan *Command {
 	return s.workChan
 }
-func (s *RegisServer) SetWorkChan(ch chan *base.Command) {
+func (s *RegisServer) SetWorkChan(ch chan *Command) {
 	s.workChan = ch
 }
 
@@ -119,9 +117,6 @@ func (s *RegisServer) GetPubSub() *ds.Dict {
 }
 func (s *RegisServer) GetPPubSub() *ds.LinkedList {
 	return s.pubsubPattern
-}
-func (s *RegisServer) GetRole() RoleType {
-	return s.role
 }
 
 func (s *RegisServer) GetInfo() string {
@@ -134,28 +129,28 @@ run_id:%v
 tcp_port:%v
 `
 	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.role, s.slave.Len(), s.masterReplOffset, s.slaveReplOffset, s.replid, port)
+	return fmt.Sprintf(serverInfo, s.Replid, s.Slave.Len(), s.MasterReplOffset, s.SlaveReplOffset, s.Replid, port)
 }
 
 func InitServer(prop *conf.RegisConf) *RegisServer {
 	server := &RegisServer{}
-	server.replid = utils.GetRandomHexChars(40)
+	server.Replid = utils.GetRandomHexChars(40)
 	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
 	server.list = &ds.LinkedList{}
-	server.db = database.NewMultiDB()
+	server.DB = database.NewMultiDB()
 
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
-	server.workChan = make(chan *base.Command)
+	server.workChan = make(chan *Command)
 	server.closeChan = make(chan int64)
 
 	server.pubsubDict = ds.NewDict(128)
 	server.pubsubPattern = ds.NewLinkedList()
 
-	server.slave = ds.NewDict(8)
+	server.Slave = ds.NewDict(8)
 
-	server.replPingSlavePeriod = 10
+	server.ReplPingSlavePeriod = 10
 
 	//server.ringbuffer = io.ReadWriteSeeker()
 
@@ -166,13 +161,13 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 func (s *RegisServer) closeClient() {
 	for {
 		id := <-s.closeChan
-		log.Debug("server close conn %v", id)
+		log.Debug("server close Conn %v", id)
 		c := s.list.RemoveFirst(func(conn interface{}) bool {
-			//sid := utils.GetConnFd(conn.(*RegisConn).conn)
-			sid := conn.(*RegisConn).id
+			//sid := utils.GetConnFd(Conn.(*RegisConn).Conn)
+			sid := conn.(*RegisConn).ID
 			return sid == id
 		})
-		_ = c.(*RegisConn).conn.Close()
+		_ = c.(*RegisConn).Conn.Close()
 		s.semp.Release(1)
 	}
 }

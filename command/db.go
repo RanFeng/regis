@@ -1,22 +1,23 @@
-package database
+package command
 
 import (
 	"code/regis/base"
 	"code/regis/ds"
 	"code/regis/lib/utils"
 	"code/regis/redis"
+	"code/regis/tcp"
 	"strconv"
 )
 
 // base.RString 操作
 
-func Set(db *SingleDB, args []string) base.Reply {
-	_ = db.PutData(args[1], base.RString(args[2]))
+func Set(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	_ = s.DB.GetSDB(c.DBIndex).PutData(args[1], base.RString(args[2]))
 	return redis.OkReply
 }
 
-func Get(db *SingleDB, args []string) base.Reply {
-	v, ok := db.GetData(args[1])
+func Get(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	v, ok := s.DB.GetSDB(c.DBIndex).GetData(args[1])
 	if !ok {
 		return redis.NilReply
 	}
@@ -27,17 +28,19 @@ func Get(db *SingleDB, args []string) base.Reply {
 	return redis.BulkReply(utils.InterfaceToBytes(val))
 }
 
-func MSet(db *SingleDB, args []string) base.Reply {
+func MSet(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
 	if len(args)%2 == 0 {
 		return redis.ArgNumErrReply(args[0])
 	}
+	db := s.DB.GetSDB(c.DBIndex)
 	for i := 1; i+1 < len(args); i += 2 {
 		_ = db.PutData(args[i], base.RString(args[i+1]))
 	}
 	return redis.OkReply
 }
-func MGet(db *SingleDB, args []string) base.Reply {
+func MGet(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
 	ret := make([]interface{}, 0, len(args)-1)
+	db := s.DB.GetSDB(c.DBIndex)
 	for i := 1; i < len(args); i++ {
 		val, ok := db.GetData(args[i])
 		if !ok {
@@ -48,18 +51,19 @@ func MGet(db *SingleDB, args []string) base.Reply {
 	}
 	return redis.ArrayReply(ret)
 }
-func Del(db *SingleDB, args []string) base.Reply {
-	ret := db.RemoveData(args[1:]...)
+func Del(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	ret := s.DB.GetSDB(c.DBIndex).RemoveData(args[1:]...)
 	return redis.IntReply(ret)
 }
 
-func DBSize(db *SingleDB, args []string) base.Reply {
-	return redis.IntReply(db.Size())
+func DBSize(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	return redis.IntReply(s.DB.GetSDB(c.DBIndex).Size())
 }
 
 // base.RList 操作
 
-func LPush(db *SingleDB, args []string) base.Reply {
+func LPush(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	db := s.DB.GetSDB(c.DBIndex)
 	v, ok := db.GetData(args[1])
 	if !ok {
 		v = ds.NewRList()
@@ -75,7 +79,8 @@ func LPush(db *SingleDB, args []string) base.Reply {
 	return redis.Int64Reply(val.Len())
 }
 
-func RPush(db *SingleDB, args []string) base.Reply {
+func RPush(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	db := s.DB.GetSDB(c.DBIndex)
 	v, ok := db.GetData(args[1])
 	if !ok {
 		db.PutData(args[1], ds.NewRList(args[2:]...))
@@ -92,7 +97,8 @@ func RPush(db *SingleDB, args []string) base.Reply {
 	return redis.Int64Reply(val.Len())
 }
 
-func LPushX(db *SingleDB, args []string) base.Reply {
+func LPushX(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	db := s.DB.GetSDB(c.DBIndex)
 	v, ok := db.GetData(args[1])
 	if !ok {
 		return redis.StrReply("(empty array)")
@@ -108,7 +114,8 @@ func LPushX(db *SingleDB, args []string) base.Reply {
 	return redis.Int64Reply(val.Len())
 }
 
-func RPushX(db *SingleDB, args []string) base.Reply {
+func RPushX(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	db := s.DB.GetSDB(c.DBIndex)
 	v, ok := db.GetData(args[1])
 	if !ok {
 		return redis.StrReply("(empty array)")
@@ -124,7 +131,8 @@ func RPushX(db *SingleDB, args []string) base.Reply {
 	return redis.Int64Reply(val.Len())
 }
 
-func LRange(db *SingleDB, args []string) base.Reply {
+func LRange(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
+	db := s.DB.GetSDB(c.DBIndex)
 	v, ok := db.GetData(args[1])
 	if !ok {
 		redis.StrReply("(empty array)")

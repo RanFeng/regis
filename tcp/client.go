@@ -101,16 +101,16 @@ func (cli *RegisClient) Handler() {
 	if err != nil {
 		log.Error("get rdb fail, err", err)
 	}
-	LoadRDB(cli.server, nil, nil)
-	cli.server.replid = syncInfo[1]
-	cli.server.role = RoleSlave
+	cli.server.LoadRDB("dump.rdb")
+	cli.server.Replid = syncInfo[1]
+	cli.server.Role = RoleSlave
 	offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
 	if err != nil {
 		log.Error("get syncInfo offset fail, err %v", syncInfo)
 	}
-	Server.masterReplOffset = offset
-	Server.slaveReplOffset = offset
-	log.Info("slave to %v", cli.server.replid)
+	Server.MasterReplOffset = offset
+	Server.SlaveReplOffset = offset
+	log.Info("slave to %v", cli.server.Replid)
 
 	// 1. 阻塞读conn中的信息
 	// 2. 解析conn中的信息为payload
@@ -129,12 +129,12 @@ func (cli *RegisClient) Handler() {
 			cli.Close()
 			return
 		}
-		Server.slaveReplOffset += int64(pc.Size)
-		Server.masterReplOffset += int64(pc.Size)
+		Server.SlaveReplOffset += int64(pc.Size)
+		Server.MasterReplOffset += int64(pc.Size)
 		selfClient.Send(redis.CmdSReply(pc.Query...))
 		reply := selfClient.Reply()
 		log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
-		cli.Send(redis.CmdReply("REPLCONF", "ACK", Server.slaveReplOffset))
+		cli.Send(redis.CmdReply("REPLCONF", "ACK", Server.SlaveReplOffset))
 	}
 }
 func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
