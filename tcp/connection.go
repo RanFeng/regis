@@ -9,11 +9,11 @@ import (
 	"net"
 )
 
-type Connection struct {
+type RegisConn struct {
 	id   int64
 	conn net.Conn
 
-	server *Server
+	server *RegisServer
 
 	//name      string // 客户端名字
 	selectedDB int // 客户端连上的db_index
@@ -27,33 +27,33 @@ type Connection struct {
 	pubsubPattern *ds.LinkedList
 }
 
-func (c *Connection) RemoteAddr() string {
+func (c *RegisConn) RemoteAddr() string {
 	return c.conn.RemoteAddr().String()
 }
 
-func (c *Connection) GetID() int64 {
+func (c *RegisConn) GetID() int64 {
 	return c.id
 }
 
-func (c *Connection) GetDBIndex() int {
+func (c *RegisConn) GetDBIndex() int {
 	return c.selectedDB
 }
 
-func (c *Connection) SetDBIndex(i int) {
+func (c *RegisConn) SetDBIndex(i int) {
 	c.selectedDB = i
 }
 
-func (c *Connection) Close() {
+func (c *RegisConn) Close() {
 	log.Info("connection close")
 	UnSubscribe(c.server, c, []string{"unsubscribe"})
 	c.server.closeChan <- utils.GetConnFd(c.conn)
 }
 
-func (c *Connection) Reply(reply base.Reply) {
+func (c *RegisConn) Reply(reply base.Reply) {
 	_, _ = c.conn.Write(reply.Bytes())
 }
 
-func (c *Connection) Handle() {
+func (c *RegisConn) Handle() {
 	// 1. 阻塞读conn中的信息
 	// 2. 解析conn中的信息为payload
 	// 3. 一旦形成一个payload，将其转化为Command传入workChan
@@ -88,20 +88,20 @@ func (c *Connection) Handle() {
 	}
 }
 
-func (c *Connection) CmdDone(cmd *base.Command) {
+func (c *RegisConn) CmdDone(cmd *base.Command) {
 	c.doneChan <- cmd
 }
 
-func (c *Connection) NSubChannel() base.LList {
+func (c *RegisConn) NSubChannel() base.LList {
 	return c.pubsubList
 }
-func (c *Connection) PSubChannel() base.LList {
+func (c *RegisConn) PSubChannel() base.LList {
 	return c.pubsubPattern
 }
 
-func initConnection(conn net.Conn, server *Server) *Connection {
+func initConnection(conn net.Conn, server *RegisServer) *RegisConn {
 	log.Debug("get conn client %v", utils.GetConnFd(conn))
-	c := &Connection{
+	c := &RegisConn{
 		id:   utils.GetConnFd(conn),
 		conn: conn,
 

@@ -11,10 +11,10 @@ import (
 
 type Debugger struct {
 	T   *testing.T
-	Cli *tcp.Client
+	Cli *tcp.RegisClient
 }
 
-func (d *Debugger) SetCli(c *tcp.Client) {
+func (d *Debugger) SetCli(c *tcp.RegisClient) {
 	d.Cli = c
 }
 
@@ -58,7 +58,7 @@ func (d *Debugger) CmdReply_(want base.Reply, cmd ...interface{}) {
 	log.Info("cmd is ok %v", cmd)
 }
 
-func NewDebugger(c *tcp.Client, t *testing.T) *Debugger {
+func NewDebugger(c *tcp.RegisClient, t *testing.T) *Debugger {
 	d := &Debugger{
 		Cli: c,
 		T:   t,

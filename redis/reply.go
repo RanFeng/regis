@@ -183,6 +183,32 @@ func (r *cmdReply) Bytes() []byte {
 	return []byte(ret)
 }
 
+// cmdSReply 用于返回一行客户端执行的cmd，也是fake client的命令请求信息
+type cmdSReply struct {
+	cmd []string
+}
+
+func CmdSReply(cmd ...string) *cmdSReply {
+	return &cmdSReply{cmd: cmd}
+}
+
+func (r *cmdSReply) Bytes() []byte {
+	if len(r.cmd) == 0 {
+		return []byte(nullBulkReplyBytes)
+	}
+	ret := fmt.Sprintf("%v%v%v", PrefixArray, len(r.cmd), CRLF)
+	for i := 0; i < len(r.cmd); i++ {
+		if len(r.cmd[i]) == 0 {
+			ret += fmt.Sprintf("%v%v%v", PrefixBulk, -1, CRLF)
+		} else {
+			msgS := utils.InterfaceToString(r.cmd[i])
+			ret += fmt.Sprintf("%v%v%v", PrefixBulk, len(msgS), CRLF)
+			ret += fmt.Sprintf("%v%v", msgS, CRLF)
+		}
+	}
+	return []byte(ret)
+}
+
 // argNumErrReply 命令参数数量不对时
 type argNumErrReply struct {
 	cmd string

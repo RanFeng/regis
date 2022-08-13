@@ -15,27 +15,27 @@ import (
 	"time"
 )
 
-type Client struct {
-	server *Server
+type RegisClient struct {
+	server *RegisServer
 	conn   net.Conn
 	addr   string // server addr
 }
 
-func (cli *Client) GetConn() net.Conn {
+func (cli *RegisClient) GetConn() net.Conn {
 	return cli.conn
 }
 
-func (cli *Client) Send(reply base.Reply) {
+func (cli *RegisClient) Send(reply base.Reply) {
 	_, _ = cli.conn.Write(reply.Bytes())
 }
 
-func (cli *Client) Close() {
+func (cli *RegisClient) Close() {
 	log.Info("client close")
 	_ = cli.conn.Close()
 }
 
 // Recv 暂时先不处理错误，反正这是假client
-func (cli *Client) Recv() base.Reply {
+func (cli *RegisClient) Recv() base.Reply {
 	reader := bufio.NewReader(cli.conn)
 	for {
 		msg, err := reader.ReadBytes('\n')
@@ -57,23 +57,20 @@ func (cli *Client) Recv() base.Reply {
 	}
 }
 
-func (cli *Client) Reply() base.Reply {
+func (cli *RegisClient) Reply() base.Reply {
 	return redis.ParseReply(cli.conn)
 }
 
-func (cli *Client) RecvN(buf []byte) (n int, err error) {
+func (cli *RegisClient) RecvN(buf []byte) (n int, err error) {
 	return io.ReadAtLeast(cli.conn, buf, 1)
 }
 
-func (cli *Client) RecvAll() (buf []byte, err error) {
+func (cli *RegisClient) RecvAll() (buf []byte, err error) {
 	//io.ReadAtLeast()
 	return io.ReadAll(cli.conn)
 }
 
-func (cli *Client) Handler() {
-	defer func() {
-		cli.Close()
-	}()
+func (cli *RegisClient) Handler() {
 	cli.Send(redis.CmdReply("ping"))
 	if !redis.Equal(cli.Reply(), redis.StrReply("PONG")) {
 		return
@@ -88,8 +85,6 @@ func (cli *Client) Handler() {
 	}
 	cli.Send(redis.CmdReply("PSYNC", "?", -1))
 	syncInfo := strings.Split(redis.GetString(cli.Reply()), " ")
-	cli.server.replid = syncInfo[1]
-
 	// 接下来master传递一个bulk字符串，用于传输rdb
 	// 先传递一个$509\r\n，其中509表示rdb大小
 	reader := bufio.NewReader(cli.conn)
@@ -107,23 +102,45 @@ func (cli *Client) Handler() {
 		log.Error("get rdb fail, err", err)
 	}
 	LoadRDB(cli.server, nil, nil)
+	cli.server.replid = syncInfo[1]
+	cli.server.role = RoleSlave
+	log.Info("slave to %v", cli.server.replid)
+	//cli.server.addClient(ctx, cli.conn)
 	//log.Info("size %v", rdbSize)
-	//go func() {
+
+	// 1. 阻塞读conn中的信息
+	// 2. 解析conn中的信息为payload
+	// 3. 一旦形成一个payload，将其转化为Command传入workChan
+	// 4. 等主线程完成再回到1
+
+	// 1. 2. 3. 解析客户端的命令并放入workChan中
+	pC := redis.Parse(cli.conn)
+	selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
+	defer selfClient.Close()
 	for {
-		buf := make([]byte, 40)
-		n, err := cli.RecvN(buf)
-		if err != nil {
-			log.Error("%v", err)
+		// 阻塞获取payload
+		pc := <-pC
+		if pc.Err != nil {
+			log.Error("connection err %v", pc.Err)
+			cli.Close()
+			return
 		}
-		log.Info("%v %v", n, utils.BytesViz(buf))
+		Server.slaveReplOffset += int64(pc.Size)
+		selfClient.Send(redis.CmdSReply(pc.Query...))
+		reply := selfClient.Reply()
+		//cli.conn.Write(cmd.Reply.Bytes())
+		log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
+		//_, _ = cli.conn.Write(reply)
+		cli.Send(redis.CmdReply("REPLCONF", "ACK", Server.slaveReplOffset))
+
 	}
 }
-func NewClient(addr string, server *Server) (*Client, error) {
+func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	cli := &Client{
+	cli := &RegisClient{
 		server: server,
 		conn:   conn,
 		addr:   addr,
@@ -131,8 +148,8 @@ func NewClient(addr string, server *Server) (*Client, error) {
 	return cli, nil
 }
 
-func MustNewClient(addr string, server *Server) *Client {
-	cli := &Client{
+func MustNewClient(addr string, server *RegisServer) *RegisClient {
+	cli := &RegisClient{
 		server: server,
 		addr:   addr,
 	}
@@ -142,7 +159,7 @@ func MustNewClient(addr string, server *Server) *Client {
 		if err == nil {
 			break
 		}
-		log.Error("Error condition on socket for SYNC: Connection refused %v", addr)
+		log.Error("Error condition on socket for SYNC: RegisConn refused %v", addr)
 		time.Sleep(time.Second)
 	}
 	return cli

@@ -17,10 +17,34 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+var (
+	ctx    = context.Background()
+	Server *RegisServer
+	Client *RegisClient
+)
+
+type RoleType int
+
+func (r RoleType) String() string {
+	switch r {
+	case RoleMaster:
+		return "master"
+	case RoleSlave:
+		return "slave"
+	}
+	return "unknown"
+}
+
+const (
+	RoleMaster RoleType = iota
+	RoleSlave
+)
+
 type replica struct {
+	role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	replid string
-	slave  *ds.Dict // 用于存储slave的client, ip:port -> *Client
-	master *Client  // 用于存储master的client
+	slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisClient
+	master *RegisClient // 用于存储master的client
 
 	masterReplOffset int64 // 当前节点作为master时，发出的offset
 	slaveReplOffset  int64 // 当前节点作为slave时，与master的同步offset
@@ -30,7 +54,7 @@ type replica struct {
 	ringbuffer io.ReadWriteSeeker
 }
 
-type Server struct {
+type RegisServer struct {
 	replica
 	lock      sync.Mutex          // 对list操作的锁
 	semp      *semaphore.Weighted // 用于控制最大客户端连接数量
@@ -50,68 +74,64 @@ type Server struct {
 	maxClients int64
 }
 
-func (s *Server) GetReplid() string {
+func (s *RegisServer) GetReplid() string {
 	return s.replid
 }
 
-func (s *Server) SetReplid(id string) {
+func (s *RegisServer) SetReplid(id string) {
 	s.replid = id
 }
 
-func (s *Server) GetAddr() string {
+func (s *RegisServer) GetAddr() string {
 	return s.address
 }
-func (s *Server) GetDB() base.DB {
+func (s *RegisServer) GetDB() base.DB {
 	return s.db
 }
-func (s *Server) FlushDB() {
+func (s *RegisServer) FlushDB() {
 	s.SetDB(database.NewMultiDB())
 }
-func (s *Server) SetDB(db base.DB) {
+func (s *RegisServer) SetDB(db base.DB) {
 	s.db = db
 }
-func (s *Server) GetWorkChan() <-chan *base.Command {
+func (s *RegisServer) GetWorkChan() <-chan *base.Command {
 	return s.workChan
 }
-func (s *Server) SetWorkChan(ch chan *base.Command) {
+func (s *RegisServer) SetWorkChan(ch chan *base.Command) {
 	s.workChan = ch
 }
 
-func (s *Server) GetPubSub() *ds.Dict {
+func (s *RegisServer) GetPubSub() *ds.Dict {
 	return s.pubsubDict
 }
-func (s *Server) GetPPubSub() *ds.LinkedList {
+func (s *RegisServer) GetPPubSub() *ds.LinkedList {
 	return s.pubsubPattern
 }
+func (s *RegisServer) GetRole() RoleType {
+	return s.role
+}
 
-func (s *Server) GetInfo() string {
-	serverInfo := `# Server
+func (s *RegisServer) GetInfo() string {
+	serverInfo := `# RegisServer
+role:%v
+connected_slaves:%v
 redis_version:6.2.5
 redis_mode:standalone
 run_id:%v
 tcp_port:%v
 `
 	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.replid, port)
+	return fmt.Sprintf(serverInfo, s.role, s.slave.Len(), s.replid, port)
 }
 
-//func (s *Server)loadRDB() {
-//	s.FlushDB()
-//	query := file.LoadRDB(conf.Conf.RDBName)
-//	for i := range query {
-//		client.Send(redis.CmdReply(query[i]))
-//		_, _ = client.RecvAll()
-//	}
-//	//client.Close()
-//}
-
-func InitServer(prop *conf.RegisConf) *Server {
-	server := &Server{}
+func InitServer(prop *conf.RegisConf) *RegisServer {
+	server := &RegisServer{}
 	server.replid = utils.GetRandomHexChars(40)
 	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
 	server.list = &ds.LinkedList{}
+	server.db = database.NewMultiDB()
 
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
 	server.workChan = make(chan *base.Command)
@@ -130,21 +150,21 @@ func InitServer(prop *conf.RegisConf) *Server {
 	return server
 }
 
-func (s *Server) closeClient() {
+func (s *RegisServer) closeClient() {
 	for {
 		id := <-s.closeChan
 		log.Debug("server close conn %v", id)
 		c := s.list.RemoveFirst(func(conn interface{}) bool {
-			//sid := utils.GetConnFd(conn.(*Connection).conn)
-			sid := conn.(*Connection).id
+			//sid := utils.GetConnFd(conn.(*RegisConn).conn)
+			sid := conn.(*RegisConn).id
 			return sid == id
 		})
-		_ = c.(*Connection).conn.Close()
+		_ = c.(*RegisConn).conn.Close()
 		s.semp.Release(1)
 	}
 }
 
-func (s *Server) addClient(ctx context.Context, conn net.Conn) {
+func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
 	//log.Debug("wait semp now is %v", s.list.Len())
 	err := s.semp.Acquire(ctx, 1)
 	if err != nil {
@@ -158,13 +178,13 @@ func (s *Server) addClient(ctx context.Context, conn net.Conn) {
 	//log.Debug("get client now is %v", s.list.Len())
 }
 
-func ListenAndServer(server *Server) error {
+func ListenAndServer(server *RegisServer) error {
 	address := fmt.Sprintf("%s:%d", conf.Conf.Bind, conf.Conf.Port)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
+	Client = MustNewClient(Server.GetAddr(), Server)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {

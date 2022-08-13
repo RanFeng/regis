@@ -11,7 +11,7 @@ import (
 )
 
 var (
-	cli *tcp.Client
+	cli *tcp.RegisClient
 	err error
 )
 

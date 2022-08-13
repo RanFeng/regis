@@ -19,13 +19,13 @@ const (
 	_unsub = "unsubscribe"
 )
 
-type ServerRealFunc func(s *Server, c base.Conn, args []string) base.Reply
+type ServerRealFunc func(s *RegisServer, c base.Conn, args []string) base.Reply
 
 func GetServerReal(exec interface{}) ServerRealFunc {
-	return exec.(func(s *Server, c base.Conn, args []string) base.Reply)
+	return exec.(func(s *RegisServer, c base.Conn, args []string) base.Reply)
 }
 
-func Ping(server *Server, conn base.Conn, args []string) base.Reply {
+func Ping(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	if len(args) >= 3 {
 		return redis.ArgNumErrReply(args[0])
 	}
@@ -35,7 +35,7 @@ func Ping(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.StrReply("PONG")
 }
 
-func Select(server *Server, conn base.Conn, args []string) base.Reply {
+func Select(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	i, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil {
 		return redis.ErrReply("ERR value is not an integer or out of range")
@@ -48,7 +48,7 @@ func Select(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.OkReply
 }
 
-func Save(server *Server, conn base.Conn, args []string) base.Reply {
+func Save(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	if server.GetDB().GetStatus() != base.WorldNormal {
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
@@ -65,7 +65,7 @@ func Save(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.OkReply
 }
 
-func BGSave(server *Server, conn base.Conn, args []string) base.Reply {
+func BGSave(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	if server.GetDB().GetStatus() != base.WorldNormal {
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
@@ -76,7 +76,7 @@ func BGSave(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.BulkStrReply("Background saving started")
 }
 
-func Publish(server *Server, conn base.Conn, args []string) base.Reply {
+func Publish(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	dict := server.GetPubSub()
 	val, ok := dict.Get(args[1])
 	if !ok {
@@ -96,7 +96,7 @@ func Publish(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.IntReply(int(list.Len()))
 }
 
-func Subscribe(server *Server, conn base.Conn, args []string) base.Reply {
+func Subscribe(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	dict := server.GetPubSub()
 	ret := make([]interface{}, 0, len(args)*3)
 	for i := 1; i < len(args); i++ {
@@ -119,7 +119,7 @@ func Subscribe(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.ArrayReply(ret)
 }
 
-func UnSubscribe(server *Server, conn base.Conn, args []string) base.Reply {
+func UnSubscribe(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	dict := server.GetPubSub()
 	if len(args) == 1 {
 		list := conn.NSubChannel()
@@ -148,41 +148,35 @@ func UnSubscribe(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.ArrayReply(ret)
 }
 
-func ReplicaOf(server *Server, conn base.Conn, args []string) base.Reply {
+func ReplicaOf(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	_, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return redis.ErrReply("ERR value is not an integer or out of range")
 	}
 
-	go func(server *Server) {
-		cli := MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]), server)
-		defer func() {
-			cli.Close()
-		}()
-		cli.Handler()
-	}(server)
+	server.master = MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]), server)
+	go server.master.Handler()
 
 	return redis.OkReply
 }
 
-func Info(server *Server, conn base.Conn, args []string) base.Reply {
+func Info(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	sInfo := server.GetInfo()
 	return redis.StrReply(sInfo)
 }
 
-func ReplConf(server *Server, conn base.Conn, args []string) base.Reply {
+func ReplConf(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	subCmd := strings.ToLower(args[1])
 	switch subCmd {
 	case "listening-port":
 		ip, _ := utils.ParseAddr(conn.RemoteAddr())
 		cli := MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
 		server.slave.Put(conn.RemoteAddr(), cli)
-
 	}
 	return redis.OkReply
 }
 
-func PSync(server *Server, conn base.Conn, args []string) base.Reply {
+func PSync(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	if args[1] != server.replid {
 		// todo begin bgsave
 		go file.SaveRDB(server.GetDB().SaveRDB) //nolint:errcheck
@@ -193,13 +187,19 @@ func PSync(server *Server, conn base.Conn, args []string) base.Reply {
 	return redis.StrReply(sInfo)
 }
 
-func LoadRDB(server *Server, conn base.Conn, args []string) base.Reply {
+func LoadRDB(server *RegisServer, conn base.Conn, args []string) base.Reply {
 	server.FlushDB()
 	query := file.LoadRDB(conf.Conf.RDBName)
-	client := MustNewClient(server.GetAddr(), server)
+	//payload := redis.Payload{
+	//	Query: nil,
+	//	Err: nil,
+	//}
 	for i := range query {
-		client.Send(redis.CmdReply(query[i]...))
+		//payload.Query = query[i]
+		//server.workChan <- payload
+		Client.Send(redis.CmdReply(query[i]...))
+		//Client.Recv()
 	}
-	client.Close()
+	//client.Close()
 	return redis.OkReply
 }
