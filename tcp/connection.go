@@ -37,7 +37,7 @@ type RegisConn struct {
 
 	doneChan chan *Command
 
-	lastBeat time.Time
+	LastBeat time.Time
 
 	// 存储客户端订阅的频道
 	PubsubList    *ds.LinkedList
@@ -51,7 +51,7 @@ func (c *RegisConn) RemoteAddr() string {
 func (c *RegisConn) Close() {
 	log.Info("connection close")
 	c.UnSubscribeAll()
-	c.server.closeClient(utils.GetConnFd(c.Conn))
+	c.server.CloseConn(utils.GetConnFd(c.Conn))
 }
 
 func (c *RegisConn) UnSubscribeAll() {
@@ -113,7 +113,7 @@ func (c *RegisConn) Handle() {
 			c.Close()
 			return
 		}
-		c.lastBeat = time.Now()
+		c.LastBeat = time.Now()
 		cmd := &Command{
 			Conn:  c,
 			Query: pc.Query,
@@ -135,7 +135,7 @@ func (c *RegisConn) CmdDone(cmd *Command) {
 	c.doneChan <- cmd
 }
 
-func initConnection(conn net.Conn, server *RegisServer) *RegisConn {
+func NewConnection(conn net.Conn, server *RegisServer) *RegisConn {
 	log.Debug("get Conn client %v", utils.GetConnFd(conn))
 	c := &RegisConn{
 		ID:            utils.GetConnFd(conn),

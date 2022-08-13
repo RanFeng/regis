@@ -6,6 +6,7 @@ import (
 	"code/regis/ds"
 	"code/regis/file"
 	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"code/regis/redis"
 	"code/regis/tcp"
 	"fmt"
@@ -50,10 +51,8 @@ func Save(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Repl
 	server.DB.SetStatus(base.WorldStopped)
 	defer server.DB.SetStatus(base.WorldNormal)
 
-	ch := make(chan struct{})
-	defer close(ch)
-
 	err := file.SaveRDB(server.DB.SaveRDB)
+
 	if err != nil {
 		return redis.ErrReply("ERR in save")
 	}
@@ -171,34 +170,58 @@ func ReplConf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.
 	case "capa":
 		return redis.OkReply
 	case "ack":
+		offset, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.IntErrReply
+		}
+		if bs, err := server.ReplBacklog.Read(offset); err == nil {
+			_ = conn.Write(bs)
+		}
 		return nil
 	}
 	return redis.OkReply
 }
 
 func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
-	if args[1] != server.Replid {
-		go func() {
-			conn.Status = base.ConnSync
-			go func() {
-				for conn.Status == base.ConnSync {
-					err := conn.Write([]byte{'\n'})
-					if err != nil {
-						return
-					}
-					time.Sleep(time.Duration(server.ReplPingSlavePeriod) * time.Second)
-				}
-			}()
-			file.SaveRDB(server.DB.SaveRDB) //nolint:errcheck
-			file.SendRDB("dump.rdb", conn.Conn)
-			server.Slave.Put(conn.RemoteAddr(), conn)
-			conn.Status = base.ConnNormal
-		}()
-		log.Info("not replid, need full sync")
-		return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.Replid, server.MasterReplOffset))
+	offset, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil {
+		return redis.IntErrReply
 	}
-	sInfo := server.GetInfo()
-	return redis.StrReply(sInfo)
+	if args[1] == server.Replid && server.ReplBacklog.Readable(offset) == nil {
+		server.Slave.Put(conn.RemoteAddr(), conn)
+		return redis.StrReply("CONTINUE")
+	}
+
+	if server.DB.GetStatus() != base.WorldNormal {
+		return redis.ErrReply("ERR can not save in bgsave")
+	}
+	server.DB.SetStatus(base.WorldFrozen)
+	server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	go func() {
+		offsetBak := server.MasterReplOffset
+		conn.Status = base.ConnSync
+		go func() {
+			for conn.Status == base.ConnSync {
+				err := conn.Write([]byte{'\n'})
+				if err != nil {
+					return
+				}
+				time.Sleep(time.Duration(server.ReplPingSlavePeriod) * time.Second)
+			}
+			//log.Info("go routine close safety")
+		}()
+		_ = file.SaveRDB(server.DB.SaveRDB)
+		file.SendRDB("dump.rdb", conn.Conn)
+		server.Slave.Put(conn.RemoteAddr(), conn)
+		conn.Status = base.ConnNormal
+		// 对增量进行同步
+		if server.ReplBacklog.Readable(offsetBak) == nil {
+			bs, _ := server.ReplBacklog.Read(offsetBak)
+			_, _ = conn.Conn.Write(bs)
+		}
+	}()
+	log.Info("not replid, need full sync")
+	return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.Replid, server.MasterReplOffset))
 }
 
 func LoadRDB(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
@@ -216,4 +239,102 @@ func LoadRDB(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.R
 	}
 	//client.Close()
 	return redis.OkReply
+}
+
+func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
+	sub := strings.ToLower(args[1])
+	switch sub {
+	case "reload":
+		Save(server, nil, nil)
+		LoadRDB(server, nil, nil)
+	case "object":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		v, ok := server.DB.GetSDB(conn.DBIndex).GetData(args[2])
+		if !ok {
+			return redis.ErrReply("ERR no such key")
+		}
+		return redis.StrReply(fmt.Sprintf("Value at:%p %v", &v, v))
+	case "populate":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		num, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.ErrReply("ERR value is out of range, must be positive")
+		}
+		var i int64
+		for i = 0; i < num; i++ {
+			key := fmt.Sprintf("key:%d", i)
+			val := fmt.Sprintf("value:%d", i)
+			_ = server.DB.GetSDB(conn.DBIndex).PutData(key, base.RString(val))
+		}
+		return redis.OkReply
+	case "sleep":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		num, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.ErrReply("ERR value is out of range, must be positive")
+		}
+		time.Sleep(time.Duration(num) * time.Second)
+		return redis.OkReply
+	case "error":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		return redis.ErrReply(args[2])
+	case "buffer":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		if server.ReplBacklog == nil {
+			return redis.NilReply
+		}
+		num, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.ErrReply("ERR value is out of range, must be positive")
+		}
+		val, err := server.ReplBacklog.Read(num)
+		if err != nil {
+			return redis.ErrReply(err.Error())
+		}
+		return redis.StrReply(utils.BytesViz(val))
+	case "who":
+		ret := []interface{}{}
+		ch := make(chan struct{})
+		defer close(ch)
+		for v := range server.Who.Range(ch) {
+			val := v.(*tcp.RegisConn)
+			_, ok := server.Slave.Get(val.RemoteAddr())
+			info := fmt.Sprintf("id: %v, addr: %v, db_index: %v is_slave: %v, last_at: %v",
+				val.ID, val.RemoteAddr(), val.DBIndex, ok, val.LastBeat)
+			ret = append(ret, info)
+		}
+		return redis.InterfacesReply(ret)
+	case "slave":
+		ret := []interface{}{}
+		ch := make(chan struct{})
+		defer close(ch)
+		for v := range server.Slave.RangeKV(ch) {
+			val := v.Val.(*tcp.RegisConn)
+			info := fmt.Sprintf("id: %v, db_index: %v status：%v, addr: %v",
+				val.ID, val.DBIndex, val.Status, val.RemoteAddr())
+			ret = append(ret, info)
+		}
+		return redis.InterfacesReply(ret)
+	case "close":
+		if len(args) < 3 {
+			return redis.ArgNumErrReply(args[0])
+		}
+		id, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.ErrReply("ERR value is out of range, must be positive")
+		}
+		server.CloseConn(id)
+		return redis.OkReply
+	}
+	return redis.ErrReply(fmt.Sprintf("ERR Unknown subcommand or wrong number of arguments for '%v'. Try DEBUG HELP.", args[1]))
 }

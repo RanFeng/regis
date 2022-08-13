@@ -81,7 +81,7 @@ func (sdb *SingleDB) SaveRDB(rdb *core.Encoder) error {
 	}()
 	for kv := range sdb.RangeKV(ch) {
 		log.Info("write kvs %v %T", kv, kv.Val)
-		time.Sleep(1 * time.Second)
+		//time.Sleep(1 * time.Second)
 		var ttlOp interface{}
 		if kv.TTL > 0 {
 			ttlOp = encoder.WithTTL(uint64(time.Now().Add(time.Duration(kv.TTL*int64(time.Millisecond))).Unix() * 1000))

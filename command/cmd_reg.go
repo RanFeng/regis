@@ -26,7 +26,7 @@ func mdbInit() {
 }
 
 func serverInit() {
-	RegCmdInfo("ping", Ping, -1, base.CmdAdmin)
+	RegCmdInfo("ping", Ping, -1, base.CmdWrite|base.CmdAdmin)
 	RegCmdInfo("select", Select, 2, base.CmdWrite|base.CmdLoading)
 	RegCmdInfo("save", Save, 1, base.CmdAdmin)
 	RegCmdInfo("bgsave", BGSave, 1, base.CmdAdmin)
@@ -39,6 +39,7 @@ func serverInit() {
 	RegCmdInfo("info", Info, -1, base.CmdAdmin)
 	RegCmdInfo("replconf", ReplConf, -3, base.CmdAdmin)
 	RegCmdInfo("psync", PSync, 3, base.CmdAdmin)
+	RegCmdInfo("debug", Debug, -2, base.CmdAdmin)
 }
 
 func ServerInit() {

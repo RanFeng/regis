@@ -5,10 +5,14 @@
 - [x] `save, bgsave, del, dbsize`
 - [x] RDB load, fake client
 - [x] RDB save
-- [ ] list, set, zset, hash command
-- [ ] redis offset
-- [ ] ring buffer
+- [x] list, but not compatibility with bgsave (need read copy)
+- [x] ring buffer (so easy)
 - [ ] slaveof, PSYNC
+- [ ] master-slave reconnection
+- [ ] set, zset, hash command
+- [ ] redis offset
+
+
 
 - [ ] info replication
 - [ ] boot from conf

@@ -18,6 +18,7 @@ func Executor() {
 
 		select {
 		case cmd := <-tcp.Server.GetWorkChan():
+			cmd.Conn.LastBeat = time.Now()
 			log.Info("get %v", cmd.Query)
 			if len(cmd.Query) == 0 {
 				cmd.Reply = redis.NilReply
@@ -30,13 +31,16 @@ func Executor() {
 					cmd.Reply = redis.ArgNumErrReply(cmd.Query[0])
 				} else {
 					cmd.Reply = cmdInfo.Exec(tcp.Server, cmd.Conn, cmd.Query)
-					if cmdInfo.HasAttr(base.CmdWrite) {
-						tcp.Server.SyncSlave(redis.CmdSReply(cmd.Query...).Bytes())
+					if tcp.Server.ReplBacklog != nil && cmdInfo.HasAttr(base.CmdWrite) {
+						cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
+						tcp.Server.MasterReplOffset += int64(len(cmdBs))
+						tcp.Server.ReplBacklog.Write(cmdBs)
+						tcp.Server.SyncSlave(cmdBs)
 					}
 				}
 			}
 			cmd.Conn.CmdDone(cmd)
-			time.Sleep(100 * time.Millisecond)
+			//time.Sleep(100 * time.Millisecond)
 		case index := <-base.NeedMoving:
 			log.Info("moving %v", index)
 			if tcp.Server.DB.GetSDB(index).GetStatus() == base.WorldMoving {

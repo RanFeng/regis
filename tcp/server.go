@@ -11,7 +11,6 @@ import (
 	"code/regis/redis"
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync"
@@ -67,26 +66,26 @@ type replica struct {
 
 	ReplPingSlavePeriod int // 给slave发心跳包的周期
 
-	Ringbuffer io.ReadWriteSeeker
+	ReplBacklog *ds.RingBuffer
 }
 
 type RegisServer struct {
 	replica
-	lock sync.Mutex          // 对list操作的锁
-	semp *semaphore.Weighted // 用于控制最大客户端连接数量
-	list *ds.LinkedList      // 存储已连接的connection
+	address    string
+	maxClients int64
+	lock       sync.Mutex          // 对list操作的锁
+	semp       *semaphore.Weighted // 用于控制最大客户端连接数量
+
+	Who *ds.LinkedList // 存储已连接的connection
 
 	// DB 是服务端的主数据库
 	DB base.DB
 
 	workChan chan *Command // 用于给主协程输送命令的
 
-	// 保存所有频道的订阅关系 channel -> list(base.Connection)
+	// 保存所有频道的订阅关系 channel -> Who(base.Connection)
 	pubsubDict    *ds.Dict
 	pubsubPattern *ds.LinkedList
-
-	address    string
-	maxClients int64
 }
 
 func (s *RegisServer) GetAddr() string {
@@ -111,11 +110,10 @@ func (s *RegisServer) SyncSlave(msg []byte) {
 	}
 	ch := make(chan struct{})
 	defer close(ch)
-	s.MasterReplOffset += int64(len(msg))
 	for kv := range s.Slave.RangeKV(ch) {
 		cli := kv.Val.(*RegisConn)
 		log.Debug("write cmd to slave %v %v", kv.Key, cli.RemoteAddr())
-		cli.Write(msg)
+		cli.Write(msg) //nolint:errcheck
 	}
 }
 
@@ -124,12 +122,12 @@ func (s *RegisServer) HeartBeatToSlave() {
 	ping := redis.CmdReply("ping").Bytes()
 	for {
 		if s.Slave.Len() > 0 {
+			Server.ReplBacklog.Write(ping)
 			Server.MasterReplOffset += int64(len(ping))
 		}
 		for kv := range s.Slave.RangeKV(ch) {
 			cli := kv.Val.(*RegisConn)
-			cli.Write(ping)
-			//cli.Send(redis.CmdReply("set", "A", "1ppp"))
+			cli.Write(ping) //nolint:errcheck
 			log.Debug("ping to cli %v", cli.RemoteAddr())
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
@@ -141,7 +139,7 @@ func (s *RegisServer) HeartBeatFromSlave() {
 	for {
 		for kv := range s.Slave.RangeKV(ch) {
 			cli := kv.Val.(*RegisConn)
-			if time.Since(cli.lastBeat) > time.Minute {
+			if time.Since(cli.LastBeat) > time.Minute {
 				log.Error("MASTER <-> REPLICA sync timeout")
 				s.Slave.Del(kv.Key)
 				cli.Close()
@@ -178,35 +176,9 @@ tcp_port:%v
 	return fmt.Sprintf(serverInfo, s.Role, s.Slave.Len(), s.MasterReplOffset, s.SlaveReplOffset, s.Replid, port)
 }
 
-func InitServer(prop *conf.RegisConf) *RegisServer {
-	server := &RegisServer{}
-	server.Replid = utils.GetRandomHexChars(40)
-	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
-	server.maxClients = prop.MaxClients
-
-	server.list = &ds.LinkedList{}
-	server.DB = database.NewMultiDB()
-
-	server.semp = semaphore.NewWeighted(prop.MaxClients)
-	server.workChan = make(chan *Command)
-
-	server.pubsubDict = ds.NewDict(128)
-	server.pubsubPattern = ds.NewLinkedList()
-
-	server.Slave = ds.NewDict(8)
-
-	server.ReplPingSlavePeriod = 10
-
-	//server.ringbuffer = io.ReadWriteSeeker()
-
-	go server.HeartBeatToSlave()
-	go server.HeartBeatFromSlave()
-	return server
-}
-
-func (s *RegisServer) closeClient(id int64) {
-	log.Debug("server close Conn %v %v", id, s.list.Len())
-	c := s.list.RemoveFirst(func(conn interface{}) bool {
+func (s *RegisServer) CloseConn(id int64) {
+	log.Debug("server close Conn %v %v", id, s.Who.Len())
+	c := s.Who.RemoveFirst(func(conn interface{}) bool {
 		sid := conn.(*RegisConn).ID
 		return sid == id
 	})
@@ -216,21 +188,21 @@ func (s *RegisServer) closeClient(id int64) {
 	_ = c.(*RegisConn).Conn.Close()
 	s.Slave.Del(c.(*RegisConn).RemoteAddr())
 	s.semp.Release(1)
-	log.Debug("after close conn %v", s.list.Len())
+	log.Debug("after close conn %v", s.Who.Len())
 }
 
 func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
-	//log.Debug("wait semp now is %v", s.list.Len())
+	//log.Debug("wait semp now is %v", s.Who.Len())
 	err := s.semp.Acquire(ctx, 1)
 	if err != nil {
 		log.Error("semp acquire fail %v", err)
 	}
-	//log.Debug("get semp now is %v", s.list.Len())
-	c := initConnection(conn, s)
+	//log.Debug("get semp now is %v", s.Who.Len())
+	c := NewConnection(conn, s)
 	s.lock.Lock()
 	defer s.lock.Unlock()
-	s.list.PushTail(c)
-	//log.Debug("get client now is %v", s.list.Len())
+	s.Who.PushTail(c)
+	//log.Debug("get client now is %v", s.Who.Len())
 }
 
 func ListenAndServer(server *RegisServer) error {
@@ -248,4 +220,30 @@ func ListenAndServer(server *RegisServer) error {
 		log.Info("accept ok %v", conn.RemoteAddr())
 		server.addClient(ctx, conn)
 	}
+}
+
+func InitServer(prop *conf.RegisConf) *RegisServer {
+	server := &RegisServer{}
+	server.Replid = utils.GetRandomHexChars(40)
+	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
+	server.maxClients = prop.MaxClients
+
+	server.Who = &ds.LinkedList{}
+	server.DB = database.NewMultiDB()
+
+	server.semp = semaphore.NewWeighted(prop.MaxClients)
+	server.workChan = make(chan *Command)
+
+	server.pubsubDict = ds.NewDict(128)
+	server.pubsubPattern = ds.NewLinkedList()
+
+	server.Slave = ds.NewDict(8)
+
+	server.ReplPingSlavePeriod = 10
+
+	server.ReplBacklog = nil
+
+	go server.HeartBeatToSlave()
+	go server.HeartBeatFromSlave()
+	return server
 }
