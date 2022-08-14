@@ -1,6 +1,7 @@
 package file
 
 import (
+	"code/regis/conf"
 	log "code/regis/lib"
 	"code/regis/redis"
 	"fmt"
@@ -62,7 +63,7 @@ func LoadRDB(fn string) (query [][]interface{}) {
 }
 
 func SaveRDB(WriteMDB func(rdb *core.Encoder) error) error {
-	fn := "dump.rdb"
+	fn := conf.Conf.RDBName
 	var err error
 	rdbFile, err := os.Create(fn)
 	if err != nil {

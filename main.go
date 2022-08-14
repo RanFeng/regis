@@ -7,6 +7,7 @@ import (
 	log "code/regis/lib"
 	"code/regis/redis"
 	"code/regis/tcp"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,9 @@ func Executor() {
 		case cmd := <-tcp.Server.GetWorkChan():
 			cmd.Conn.LastBeat = time.Now()
 			log.Info("get %v", cmd.Query)
+			if !tcp.Server.PassExec(cmd.Conn) {
+				continue
+			}
 			if len(cmd.Query) == 0 {
 				cmd.Reply = redis.NilReply
 			} else {
@@ -31,10 +35,12 @@ func Executor() {
 					cmd.Reply = redis.ArgNumErrReply(cmd.Query[0])
 				} else {
 					cmd.Reply = cmdInfo.Exec(tcp.Server, cmd.Conn, cmd.Query)
-					if tcp.Server.ReplBacklog != nil && cmdInfo.HasAttr(base.CmdWrite) {
+					if tcp.Server.ReplBacklog.IsActive() && cmdInfo.HasAttr(base.CmdWrite) {
 						cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
-						tcp.Server.MasterReplOffset += int64(len(cmdBs))
-						tcp.Server.ReplBacklog.Write(cmdBs)
+						//log.Info("add from here1 %v %v %v %v %v", tcp.Server.MasterReplOffset,
+						//cmd.Conn.ID, cmd.Conn.RemoteAddr(), tcp.Client.ID, tcp.Client.LocalAddr())
+						atomic.AddInt64(&tcp.Server.MasterReplOffset, tcp.Server.ReplBacklog.Write(cmdBs))
+						//log.Info("add from here2 %v", tcp.Server.MasterReplOffset)
 						tcp.Server.SyncSlave(cmdBs)
 					}
 				}
@@ -56,7 +62,7 @@ func Executor() {
 }
 
 func main() {
-	conf.LoadConf("redis.conf")
+	conf.LoadConf()
 
 	command.ServerInit()
 	tcp.Server = tcp.InitServer(conf.Conf)
@@ -68,8 +74,6 @@ func main() {
 		}()
 		_ = tcp.ListenAndServer(tcp.Server)
 	}()
-
-	go tcp.Server.LoadRDB(conf.Conf.RDBName)
 
 	Executor()
 }

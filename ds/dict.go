@@ -2,25 +2,59 @@ package ds
 
 import (
 	"code/regis/base"
-	log "code/regis/lib"
+	"sync"
 )
 
 type Dict struct {
+	// enableLock 是否启用锁，如果不启用，下面的锁都不会执行
+	enableLock bool
+
+	// singleLock 单个函数时上的锁，
+	// 比如想执行一个range函数，就会上singleLock锁，
+	// 注意 singleLock 锁是自动上的，一旦enableLock开启了，就会在执行函数上锁，对使用者是透明的
+	singleLock sync.Mutex
+
+	// serialLock 执行多个函数时上的锁，
+	// 比如想执行一个range函数后再执行del函数，而且希望这期间不被其他调用者抢占
+	// 就手动调用 Lock, UnLock 函数来完成
+	serialLock sync.Mutex
+
 	m map[string]interface{}
 }
 
-func NewDict(size int64) *Dict {
+func NewDict(size int64, enableLock bool) *Dict {
 	return &Dict{
-		m: make(map[string]interface{}, size),
+		enableLock: enableLock,
+		m:          make(map[string]interface{}, size),
+	}
+}
+
+func (dict *Dict) Lock() {
+	if dict.enableLock {
+		dict.serialLock.Lock()
+	}
+}
+
+func (dict *Dict) UnLock() {
+	if dict.enableLock {
+		dict.serialLock.Unlock()
 	}
 }
 
 func (dict *Dict) Get(key string) (val interface{}, exists bool) {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	val, exists = dict.m[key]
 	return val, exists
 }
 
 func (dict *Dict) RandomKey(num int) []string {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	keys := make([]string, 0, num)
 	for k := range dict.m {
 		if num == 0 {
@@ -34,6 +68,10 @@ func (dict *Dict) RandomKey(num int) []string {
 
 // Put 插入，返回更改后新增的数量
 func (dict *Dict) Put(key string, val interface{}) int {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	_, ok := dict.m[key]
 	dict.m[key] = val
 	if !ok {
@@ -44,6 +82,10 @@ func (dict *Dict) Put(key string, val interface{}) int {
 
 // Del 删除，返回删除后更改的数量
 func (dict *Dict) Del(key string) int {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	_, ok := dict.m[key]
 	if !ok {
 		return 0
@@ -70,11 +112,16 @@ func (dict *Dict) Del(key string) int {
  * @return chan 用于传给调用方一个迭代器，由 RangeKey 声明、传出、负责关闭
 */
 func (dict *Dict) RangeKey(ch <-chan struct{}) chan string {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+	}
 	keys := make(chan string)
 	go func() {
 		defer func() {
-			log.Info("close ch")
 			close(keys)
+			if dict.enableLock {
+				dict.singleLock.Unlock()
+			}
 		}()
 		for k := range dict.m {
 			select {
@@ -88,10 +135,16 @@ func (dict *Dict) RangeKey(ch <-chan struct{}) chan string {
 }
 
 func (dict *Dict) RangeKV(ch <-chan struct{}) chan base.DictKV {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+	}
 	keys := make(chan base.DictKV)
 	go func() {
 		defer func() {
 			close(keys)
+			if dict.enableLock {
+				dict.singleLock.Unlock()
+			}
 		}()
 		for k, v := range dict.m {
 			select {
@@ -104,10 +157,30 @@ func (dict *Dict) RangeKV(ch <-chan struct{}) chan base.DictKV {
 	return keys
 }
 
+func (dict *Dict) GetAllKeys() []string {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
+	ret := make([]string, 0, len(dict.m))
+	for k := range dict.m {
+		ret = append(ret, k)
+	}
+	return ret
+}
+
 func (dict *Dict) Len() int {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	return len(dict.m)
 }
 
 func (dict *Dict) Clear() {
+	if dict.enableLock {
+		dict.singleLock.Lock()
+		defer dict.singleLock.Unlock()
+	}
 	dict.m = map[string]interface{}{}
 }

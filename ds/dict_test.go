@@ -8,7 +8,7 @@ import (
 )
 
 func TestDict_RangeKey(t *testing.T) {
-	dict := NewDict(16)
+	dict := NewDict(16, false)
 	for i := 0; i < 15; i++ {
 		dict.Put(fmt.Sprintf("aaa%v", i), fmt.Sprintf("bbb%v", i))
 	}
@@ -26,7 +26,7 @@ func TestDict_RangeKey(t *testing.T) {
 }
 
 func TestDict_RangeKV(t *testing.T) {
-	dict := NewDict(16)
+	dict := NewDict(16, false)
 	for i := 0; i < 15; i++ {
 		dict.Put(fmt.Sprintf("aaa%v", i), fmt.Sprintf("bbb%v", i))
 	}

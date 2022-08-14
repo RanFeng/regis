@@ -37,9 +37,13 @@ func serverInit() {
 	// 主从
 	RegCmdInfo("replicaof", ReplicaOf, 3, base.CmdAdmin)
 	RegCmdInfo("info", Info, -1, base.CmdAdmin)
+	RegCmdInfo("flushall", FlushALl, 1, base.CmdWrite|base.CmdAdmin)
 	RegCmdInfo("replconf", ReplConf, -3, base.CmdAdmin)
 	RegCmdInfo("psync", PSync, 3, base.CmdAdmin)
 	RegCmdInfo("debug", Debug, -2, base.CmdAdmin)
+	RegCmdInfo("lock", Lock, 1, base.CmdAdmin)
+	RegCmdInfo("unlock", UnLock, 1, base.CmdAdmin)
+
 }
 
 func ServerInit() {

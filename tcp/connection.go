@@ -7,6 +7,7 @@ import (
 	"code/regis/lib/utils"
 	"code/regis/redis"
 	"net"
+	"strconv"
 	"time"
 )
 
@@ -23,7 +24,7 @@ type Command struct {
 // RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
 // RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
 type RegisConn struct {
-	ID   int64
+	ID   string
 	Conn net.Conn
 
 	// 一般来说都是 base.ConnNormal 的状态
@@ -51,7 +52,7 @@ func (c *RegisConn) RemoteAddr() string {
 func (c *RegisConn) Close() {
 	log.Info("connection close")
 	c.UnSubscribeAll()
-	c.server.CloseConn(utils.GetConnFd(c.Conn))
+	c.server.CloseConn(c.ID)
 }
 
 func (c *RegisConn) UnSubscribeAll() {
@@ -138,7 +139,7 @@ func (c *RegisConn) CmdDone(cmd *Command) {
 func NewConnection(conn net.Conn, server *RegisServer) *RegisConn {
 	log.Debug("get Conn client %v", utils.GetConnFd(conn))
 	c := &RegisConn{
-		ID:            utils.GetConnFd(conn),
+		ID:            strconv.FormatInt(utils.GetConnFd(conn), 10),
 		Conn:          conn,
 		server:        server,
 		doneChan:      make(chan *Command),

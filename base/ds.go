@@ -9,6 +9,8 @@ type LList interface {
 	Insert(val interface{}, pos int64)
 	RemoveFirst(cmp func(interface{}) bool) interface{}
 	Range(ch <-chan struct{}) chan interface{}
+	UnLock()
+	Lock()
 	Clear()
 }
 
@@ -30,7 +32,10 @@ type Dict interface {
 	Put(key string, val interface{}) int
 	RangeKey(ch <-chan struct{}) chan string
 	RangeKV(ch <-chan struct{}) chan DictKV
+	GetAllKeys() []string
 	RandomKey(num int) []string
+	UnLock()
+	Lock()
 	Len() int
 	Clear()
 }

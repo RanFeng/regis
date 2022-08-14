@@ -246,12 +246,12 @@ func (sdb *SingleDB) NotifyMoving(i int) {
 
 func (sdb *SingleDB) Flush() {
 	sdb.db = &carrier{
-		data:   ds.NewDict(dataDictSize),
-		expire: ds.NewDict(expireDictSize),
+		data:   ds.NewDict(dataDictSize, false),
+		expire: ds.NewDict(expireDictSize, false),
 	}
 	sdb.bgDB = &carrier{
-		data:   ds.NewDict(dataDictSize >> 10),
-		expire: ds.NewDict(expireDictSize >> 10),
+		data:   ds.NewDict(dataDictSize>>10, false),
+		expire: ds.NewDict(expireDictSize>>10, false),
 	}
 	sdb.status = base.WorldNormal
 }
@@ -308,12 +308,12 @@ func (sdb *SingleDB) TTLSize() int {
 
 func newSDB() *SingleDB {
 	db := &carrier{
-		data:   ds.NewDict(dataDictSize),
-		expire: ds.NewDict(expireDictSize),
+		data:   ds.NewDict(dataDictSize, false),
+		expire: ds.NewDict(expireDictSize, false),
 	}
 	bgDB := &carrier{
-		data:   ds.NewDict(dataDictSize >> 10),
-		expire: ds.NewDict(expireDictSize >> 10),
+		data:   ds.NewDict(dataDictSize>>10, false),
+		expire: ds.NewDict(expireDictSize>>10, false),
 	}
 	sdb := &SingleDB{
 		status: base.WorldNormal,

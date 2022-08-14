@@ -14,6 +14,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -43,27 +44,27 @@ const (
 )
 
 type replica struct {
+	// 当自己又是slave又是master时，说明自己是个slave
 	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	Replid string
-	Slave  *ds.Dict // 用于存储slave的client, ip:port -> *RegisConn
+	Slave  *ds.Dict // 用于存储slave的connection, RegisConn.ID -> *RegisConn
 
 	// 用于存储master的client, 如果为nil，表示当前不是slave
 	// 如果与master断开链接，并不能将 Master 置为 nil !!
+	// 除非不想要主从同步了
 	Master *RegisClient
 
-	// 当前节点作为master时，往缓冲区存进去的字节数
+	// 当前节点往缓冲区存进去的字节数
 	// 如果不是主从结构，写命令来时不会增加
-	// 如果是主从结构，且自己是master，将用户命令写入缓冲区并进行计数
+	// 如果是主从结构，且自己是master，将用户命令写入缓冲区并进行计数，
+	// 如果是slave，且master传来了写命令，也要写入缓冲区中并进行计数
 	//	如果一个slave来要求全量同步，发出 fullsync replid masterReplOffset，并发出rdb文件
 	//	表示："我发给你的rdb文件同步进度是 masterReplOffset"
-	//  如果自己是slave，在改变 slaveReplOffset 的时候，也要同时改变 masterReplOffset
-	//  因为谁也不知道会不会在后面，有新的slave认领该服务器为master
-	// TODO 如果是部分同步呢
 	MasterReplOffset int64
 
 	// 当前节点作为slave时，与master的同步offset
 	// 收到 fullsync ID offset 之后，会收到一个rdb文件，将rdb load到db中之后
-	// 令 slaveReplOffset = offset
+	// 令 SlaveReplOffset = offset, MasterReplOffset = offset
 	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
 	SlaveReplOffset int64
 
@@ -73,14 +74,19 @@ type replica struct {
 	ReplBacklog *ds.RingBuffer
 }
 
+type safety struct {
+	Lock       sync.Mutex // 对 RegisServer.Who, RegisServer.Slave 操作的锁
+	Monopolist string
+	semp       *semaphore.Weighted // 用于控制最大客户端连接数量
+	Who        *ds.Dict            // 存储已连接的connection，RegisConn.ID -> *RegisConn
+}
+
 type RegisServer struct {
-	replica
 	address    string
 	maxClients int64
-	lock       sync.Mutex          // 对list操作的锁
-	semp       *semaphore.Weighted // 用于控制最大客户端连接数量
 
-	Who *ds.LinkedList // 存储已连接的connection
+	replica
+	safety
 
 	// DB 是服务端的主数据库
 	DB base.DB
@@ -92,6 +98,13 @@ type RegisServer struct {
 	pubsubPattern *ds.LinkedList
 }
 
+func (s *RegisServer) PassExec(c *RegisConn) bool {
+	if len(s.Monopolist) == 0 {
+		return true
+	}
+	return c.RemoteAddr() == s.Monopolist
+}
+
 func (s *RegisServer) GetAddr() string {
 	return s.address
 }
@@ -101,11 +114,13 @@ func (s *RegisServer) FlushDB() {
 }
 
 func (s *RegisServer) LoadRDB(fn string) {
-	s.DB.Flush()
+	Client.Send(redis.CmdReply("lock"))
 	query := file.LoadRDB(fn)
 	for i := range query {
 		Client.Send(redis.CmdReply(query[i]...))
+		_ = Client.GetReply()
 	}
+	Client.Send(redis.CmdReply("unlock"))
 }
 
 func (s *RegisServer) SyncSlave(msg []byte) {
@@ -121,23 +136,31 @@ func (s *RegisServer) SyncSlave(msg []byte) {
 	}
 }
 
+// HeartBeatToSlave
+// 当自己是master时，用这个来告知slave自己的存活状态。
+// 当自己是slave，同时也是别的机器的master时，就不用告知了
+//   上面的master会发出ping包，我转发那个ping包就行
 func (s *RegisServer) HeartBeatToSlave() {
 	ch := make(chan struct{})
 	ping := redis.CmdReply("ping").Bytes()
 	for {
-		if s.Slave.Len() > 0 {
-			Server.ReplBacklog.Write(ping)
-			Server.MasterReplOffset += int64(len(ping))
-		}
-		for kv := range s.Slave.RangeKV(ch) {
-			cli := kv.Val.(*RegisConn)
-			_ = cli.Write(ping)
-			log.Debug("ping to cli %v", cli.RemoteAddr())
+		if s.Role == RoleMaster {
+			for kv := range s.Slave.RangeKV(ch) {
+				cli := kv.Val.(*RegisConn)
+				_ = cli.Write(ping)
+				log.Debug("ping to cli %v", cli.RemoteAddr())
+			}
+			atomic.AddInt64(&Server.MasterReplOffset, Server.ReplBacklog.Write(ping))
+			log.Info("HeartBeatToSlave add MasterReplOffset %v", Server.MasterReplOffset)
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
 	}
 }
 
+// HeartBeatFromSlave
+// 当自己是master时，用这个来监听slave是否存活，
+//   如果超出时间，slave没有朝我发送心跳包时，就当它没了，要关闭。
+// 当自己是slave，同时也是别的机器的master时，也要监听自己的slave的存活状态
 func (s *RegisServer) HeartBeatFromSlave() {
 	ch := make(chan struct{})
 	for {
@@ -158,6 +181,9 @@ func (s *RegisServer) ReconnectMaster() {
 	cli.PSync()
 }
 
+// HeartBeatToMaster
+// 当自己是slave时，定时向master发出心跳包，证明自己存活。
+// 当自己是slave和master时，也要向自己的master发心跳包证明自己存活
 func (s *RegisServer) HeartBeatToMaster() {
 	var ack base.Reply
 	for {
@@ -173,6 +199,9 @@ func (s *RegisServer) HeartBeatToMaster() {
 	}
 }
 
+// HeartBeatFromMaster
+// 当自己是slave时，定时向检查master的存活
+// 当自己是slave和master时，也要定时向检查master的存活
 func (s *RegisServer) HeartBeatFromMaster() {
 	for {
 		if s.Master != nil {
@@ -187,9 +216,6 @@ func (s *RegisServer) HeartBeatFromMaster() {
 
 func (s *RegisServer) GetWorkChan() <-chan *Command {
 	return s.workChan
-}
-func (s *RegisServer) SetWorkChan(ch chan *Command) {
-	s.workChan = ch
 }
 
 func (s *RegisServer) GetPubSub() *ds.Dict {
@@ -209,22 +235,23 @@ run_id:%v
 tcp_port:%v
 `
 	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.Role, s.Slave.Len(), s.MasterReplOffset, s.SlaveReplOffset, s.Replid, port)
+	return fmt.Sprintf(serverInfo, s.Role, s.Slave.Len(),
+		atomic.LoadInt64(&s.MasterReplOffset), atomic.LoadInt64(&s.SlaveReplOffset), s.Replid, port)
 }
 
-func (s *RegisServer) CloseConn(id int64) {
-	log.Debug("server close Conn %v %v", id, s.Who.Len())
-	c := s.Who.RemoveFirst(func(conn interface{}) bool {
-		sid := conn.(*RegisConn).ID
-		return sid == id
-	})
-	if c == nil {
-		return
+func (s *RegisServer) CloseConn(ids ...string) {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	for _, id := range ids {
+		c, ok := s.Who.Get(id)
+		if !ok {
+			return
+		}
+		s.Who.Del(id)
+		_ = c.(*RegisConn).Conn.Close()
+		s.Slave.Del(id)
+		s.semp.Release(1)
 	}
-	_ = c.(*RegisConn).Conn.Close()
-	s.Slave.Del(c.(*RegisConn).RemoteAddr())
-	s.semp.Release(1)
-	log.Debug("after close Conn %v", s.Who.Len())
 }
 
 func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
@@ -235,19 +262,21 @@ func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
 	}
 	//log.Debug("get semp now is %v", s.Who.Len())
 	c := NewConnection(conn, s)
-	s.lock.Lock()
-	defer s.lock.Unlock()
-	s.Who.PushTail(c)
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
+	s.Who.Put(c.ID, c)
 	//log.Debug("get client now is %v", s.Who.Len())
 }
 
 func ListenAndServer(server *RegisServer) error {
 	address := fmt.Sprintf("%s:%d", conf.Conf.Bind, conf.Conf.Port)
+	log.Notice("listen in %v", address)
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return err
 	}
 	Client = MustNewClient(Server.GetAddr(), Server)
+	go Server.LoadRDB(conf.Conf.RDBName)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -264,21 +293,21 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
-	server.Who = &ds.LinkedList{}
+	server.Who = ds.NewDict(conf.Conf.MaxClients, true)
 	server.DB = database.NewMultiDB()
 
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
 	server.workChan = make(chan *Command)
 
-	server.pubsubDict = ds.NewDict(128)
+	server.pubsubDict = ds.NewDict(128, false)
 	server.pubsubPattern = ds.NewLinkedList()
 
-	server.Slave = ds.NewDict(8)
+	server.Slave = ds.NewDict(8, true)
 
 	server.ReplPingSlavePeriod = 10
 	server.ReplPingMasterPeriod = 3
 
-	server.ReplBacklog = nil
+	server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
 
 	go server.HeartBeatToSlave()
 	go server.HeartBeatFromSlave()

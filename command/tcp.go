@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -143,13 +144,21 @@ func UnSubscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) ba
 
 // ReplicaOf 自己是slave，向master要同步
 func ReplicaOf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
+	if args[1] == "no" && args[2] == "one" {
+		if server.Master != nil {
+			server.Role = tcp.RoleMaster
+			server.Master.Close()
+			server.Master = nil
+		}
+		return redis.OkReply
+	}
 	_, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return redis.ErrReply("ERR value is not an integer or out of range")
 	}
 
 	addr := fmt.Sprintf("%v:%v", args[1], args[2])
-	if server.Master != nil && server.Master.Addr == addr {
+	if server.Master != nil { // 只要master在，就不允许继续同步
 		return redis.ErrReply("ERR already slave")
 	}
 	cli, err := tcp.NewClient(addr, server)
@@ -161,9 +170,35 @@ func ReplicaOf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base
 	return redis.OkReply
 }
 
+func Lock(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
+	server.Lock.Lock()
+	defer server.Lock.Unlock()
+	if len(server.Monopolist) == 0 {
+		server.Monopolist = conn.RemoteAddr()
+		return redis.OkReply
+	}
+	return redis.ErrReply(fmt.Sprintf("ERR monopolized by %v", server.Monopolist))
+}
+
+func UnLock(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
+	server.Lock.Lock()
+	defer server.Lock.Unlock()
+	if len(server.Monopolist) == 0 || server.Monopolist == conn.RemoteAddr() {
+		server.Monopolist = ""
+		return redis.OkReply
+	}
+
+	return redis.ErrReply(fmt.Sprintf("ERR monopolized by %v", server.Monopolist))
+}
+
 func Info(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
 	sInfo := server.GetInfo()
 	return redis.StrReply(sInfo)
+}
+
+func FlushALl(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
+	server.DB.Flush()
+	return redis.OkReply
 }
 
 func ReplConf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
@@ -188,16 +223,15 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	}
 	offset -= 1
 
-	if args[1] == server.Replid && server.ReplBacklog != nil {
-		log.Info("will do partial sync")
+	if args[1] == server.Replid && server.ReplBacklog.IsActive() {
+		log.Info("try partial sync")
 		bs, err := server.ReplBacklog.Read(offset)
 		if err == nil {
 			_ = conn.Write(redis.InlineSReply("CONTINUE").Bytes())
 			_ = conn.Write(bs)
-			server.Slave.Put(conn.RemoteAddr(), conn)
+			server.Slave.Put(conn.ID, conn)
 			return nil
 		}
-		log.Info("Read err %v %v", offset, err)
 	}
 
 	log.Notice("Full resync requested by replica %v", conn.RemoteAddr())
@@ -205,34 +239,32 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
 	server.DB.SetStatus(base.WorldFrozen)
-	if server.ReplBacklog == nil {
-		server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
-	}
 
-	_ = conn.Write(redis.InlineIReply("FULLRESYNC", server.Replid, server.MasterReplOffset).Bytes())
+	server.ReplBacklog.SetStatus(true)
+
+	_ = conn.Write(redis.InlineIReply("FULLRESYNC", server.Replid, atomic.LoadInt64(&server.MasterReplOffset)).Bytes())
 
 	go func() {
 		log.Notice("Starting BGSAVE for SYNC with target: disk")
-		offsetBak := server.MasterReplOffset
+		offsetBak := atomic.LoadInt64(&server.MasterReplOffset)
 		conn.Status = base.ConnSync
-		go func() {
-			// 防止在传输rdb过程中，长时间不给slave发心跳包，导致slave以为master挂了
-			for conn.Status == base.ConnSync {
-				err := conn.Write([]byte{'\n'})
-				if err != nil {
-					return
-				}
-				time.Sleep(time.Duration(server.ReplPingSlavePeriod) * time.Second)
-			}
-			//log.Info("go routine close safety")
-		}()
+		//go func() {
+		//	// 防止在传输rdb过程中，长时间不给slave发心跳包，导致slave以为master挂了
+		//	for conn.Status == base.ConnSync {
+		//		err := conn.Write([]byte{'\n'})
+		//		if err != nil {
+		//			return
+		//		}
+		//		time.Sleep(time.Duration(server.ReplPingSlavePeriod) * time.Second)
+		//	}
+		//	//log.Info("go routine close safety")
+		//}()
 		_ = file.SaveRDB(server.DB.SaveRDB)
-		file.SendRDB("dump.rdb", conn.Conn)
-		server.Slave.Put(conn.RemoteAddr(), conn)
+		file.SendRDB(conf.Conf.RDBName, conn.Conn)
+		server.Slave.Put(conn.ID, conn)
 		conn.Status = base.ConnNormal
 		// 对增量进行同步
-		if server.ReplBacklog.Readable(offsetBak) == nil {
-			bs, _ := server.ReplBacklog.Read(offsetBak)
+		if bs, err := server.ReplBacklog.Read(offsetBak); err == nil {
 			_, _ = conn.Conn.Write(bs)
 		}
 	}()
@@ -244,7 +276,9 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	switch sub {
 	case "reload":
 		Save(server, nil, nil)
+		server.DB.Flush()
 		server.LoadRDB(conf.Conf.RDBName)
+		return redis.OkReply
 	case "object":
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
@@ -296,7 +330,7 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
 		}
-		if server.ReplBacklog == nil {
+		if server.ReplBacklog.IsActive() {
 			return redis.NilReply
 		}
 		num, err := strconv.ParseInt(args[2], 10, 64)
@@ -312,9 +346,9 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		ret := []interface{}{}
 		ch := make(chan struct{})
 		defer close(ch)
-		for v := range server.Who.Range(ch) {
-			val := v.(*tcp.RegisConn)
-			_, ok := server.Slave.Get(val.RemoteAddr())
+		for kv := range server.Who.RangeKV(ch) {
+			val := kv.Val.(*tcp.RegisConn)
+			_, ok := server.Slave.Get(val.ID)
 			info := fmt.Sprintf("id: %v, addr: %v, db_index: %v, is_slave: %v, last_at: %v",
 				val.ID, val.RemoteAddr(), val.DBIndex, ok, val.LastBeat)
 			ret = append(ret, info)
@@ -340,11 +374,7 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
 		}
-		id, err := strconv.ParseInt(args[2], 10, 64)
-		if err != nil {
-			return redis.ErrReply("ERR value is out of range, must be positive")
-		}
-		server.CloseConn(id)
+		server.CloseConn(args[2])
 		return redis.OkReply
 	}
 	return redis.ErrReply(fmt.Sprintf("ERR Unknown subcommand or wrong number of arguments for '%v'. Try DEBUG HELP.", args[1]))

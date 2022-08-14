@@ -1,5 +1,6 @@
 vendor
 output
+regis
 *.rdb
 *.o
 *.a
@@ -35,6 +36,7 @@ _testmain.go
 /.idea
 /.vscode
 /output
+/target
 *.local.yml
 sync.sh
 log/

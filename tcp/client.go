@@ -12,6 +12,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,7 +23,7 @@ import (
 // RegisClient 是本地任意端口连接其他redis服务器，所以远端主库都在 RegisClient
 // RegisConn 是远端任意端口连接本redis服务器，所以远端从库都在 RegisConn
 type RegisClient struct {
-	ID     int64
+	ID     string
 	server *RegisServer
 	Conn   net.Conn
 
@@ -32,6 +33,10 @@ type RegisClient struct {
 
 func (cli *RegisClient) RemoteAddr() string {
 	return cli.Conn.RemoteAddr().String()
+}
+
+func (cli *RegisClient) LocalAddr() string {
+	return cli.Conn.LocalAddr().String()
 }
 
 func (cli *RegisClient) Send(reply base.Reply) {
@@ -89,8 +94,8 @@ func (cli *RegisClient) RecvAll() (buf []byte, err error) {
 
 // PartSync 自己是slave，从远端master 增量同步到自己
 func (cli *RegisClient) PartSync() {
-	selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
-	defer selfClient.Close()
+	//selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
+	//defer selfClient.Close()
 	r := bufio.NewReader(cli.Conn)
 	for {
 		n, query, err := redis.Parse2Inline(r)
@@ -99,21 +104,23 @@ func (cli *RegisClient) PartSync() {
 			log.Error("PartSync err %v", err)
 			return
 		}
-		Server.SlaveReplOffset += int64(n)
-		Server.MasterReplOffset += int64(n)
-		selfClient.Send(redis.CmdSReply(query...))
-		_ = selfClient.GetReply()
+		atomic.AddInt64(&Server.SlaveReplOffset, int64(n))
+		//log.Info("PartSync add MasterReplOffset %v %v", Server.SlaveReplOffset, n)
+		Client.Send(redis.CmdSReply(query...))
+		_ = Client.GetReply()
 		//reply := selfClient.GetReply()
 		//log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
 	}
 }
 
+// FullSync 自己是slave，要拉远端master同步
 func (cli *RegisClient) FullSync(replid string, offset int64) {
 	// 接下来master传递一个bulk字符串，用于传输rdb
 	// 先传递一个$509\r\n，其中509表示rdb大小
 	log.Notice("Full resync from master: %v:%v", replid, offset)
 	reader := bufio.NewReader(cli.Conn)
 	msg, err := reader.ReadBytes('\n')
+	log.Info("read msg %v", utils.BytesViz(msg))
 	if err != nil {
 		return
 	}
@@ -121,21 +128,32 @@ func (cli *RegisClient) FullSync(replid string, offset int64) {
 	if err != nil {
 		return
 	}
-	err = file.SaveFile("dump.rdb", reader, int(rdbSize))
+	err = file.SaveFile(conf.Conf.RDBName, reader, int(rdbSize))
 	if err != nil {
 		log.Error("get rdb fail, err %v", err)
 	}
-	cli.server.LoadRDB("dump.rdb")
+	//Client.Send(redis.CmdReply("FLUSHALL"))
+
+	cli.server.DB.Flush()
+	cli.server.ReplBacklog.Clear()
+	cli.server.ReplBacklog.SetStatus(false)
+
+	cli.server.LoadRDB(conf.Conf.RDBName)
+
+	cli.server.Role = RoleSlave
 	cli.server.Replid = replid
-	cli.server.MasterReplOffset = offset
-	cli.server.SlaveReplOffset = offset
+	atomic.SwapInt64(&cli.server.MasterReplOffset, offset)
+	atomic.SwapInt64(&cli.server.SlaveReplOffset, offset)
+
+	cli.server.CloseConn(cli.server.Slave.GetAllKeys()...)
 	log.Notice("MASTER <-> REPLICA sync: Finished with success")
 	//log.Notice("Synchronization with replica %v succeeded", cli.RemoteAddr())
 }
 
+// PSync 自己是slave，要拉远端master同步
 func (cli *RegisClient) PSync() {
 	log.Notice("MASTER <-> REPLICA sync started")
-	cli.Send(redis.CmdReply("ping"))
+	cli.Send(redis.CmdReply("ping")) // TODO 此处发出的ping会被master认为是master的master发来的
 	if !redis.Equal(cli.GetReply(), redis.StrReply("PONG")) {
 		return
 	}
@@ -147,13 +165,13 @@ func (cli *RegisClient) PSync() {
 	if !redis.Equal(cli.GetReply(), redis.OkReply) {
 		return
 	}
-	if cli.server.Master == nil {
-		cli.Send(redis.CmdReply("PSYNC", "?", -1))
-	} else {
-		log.Notice("Trying a partial resynchronization (request %v:%v).",
-			cli.server.Replid, cli.server.SlaveReplOffset+1)
-		cli.Send(redis.CmdReply("PSYNC", cli.server.Replid, cli.server.SlaveReplOffset+1))
-	}
+	//if cli.server.Master == nil {
+	//	cli.Send(redis.CmdReply("PSYNC", "?", -1))
+	//} else {
+	log.Notice("Trying a partial resynchronization (request %v:%v).",
+		cli.server.Replid, cli.server.SlaveReplOffset+1)
+	cli.Send(redis.CmdReply("PSYNC", cli.server.Replid, cli.server.SlaveReplOffset+1))
+	//}
 	syncInfo := strings.Split(redis.GetString(cli.GetReply()), " ")
 	if len(syncInfo) == 3 { // 是 full sync
 		tag := strings.ToUpper(syncInfo[0])
@@ -171,7 +189,7 @@ func (cli *RegisClient) PSync() {
 	}
 	go cli.PartSync()
 	cli.LastBeat = time.Now()
-	cli.server.Role = RoleSlave
+	cli.server.ReplBacklog.SetStatus(true)
 	cli.server.Master = cli
 	log.Info("slave to %v %v %v", cli.server.Replid, cli.RemoteAddr(), cli.server.SlaveReplOffset)
 }
@@ -182,7 +200,7 @@ func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
 		return nil, err
 	}
 	cli := &RegisClient{
-		ID:     utils.GetConnFd(conn),
+		ID:     strconv.FormatInt(utils.GetConnFd(conn), 10),
 		server: server,
 		Conn:   conn,
 		Addr:   addr,
@@ -204,6 +222,6 @@ func MustNewClient(addr string, server *RegisServer) *RegisClient {
 		log.Error("Error condition on socket for SYNC: RegisConn refused %v", addr)
 		time.Sleep(time.Second)
 	}
-	cli.ID = utils.GetConnFd(cli.Conn)
+	cli.ID = strconv.FormatInt(utils.GetConnFd(cli.Conn), 10)
 	return cli
 }

@@ -4,6 +4,7 @@ import (
 	"code/regis/base"
 	log "code/regis/lib"
 	"fmt"
+	"sync"
 )
 
 type chainOpType int
@@ -17,6 +18,15 @@ type LinkedList struct {
 	len  int64
 	head *node
 	tail *node
+	lock sync.Mutex
+}
+
+func (list *LinkedList) Lock() {
+	list.lock.Lock()
+}
+
+func (list *LinkedList) UnLock() {
+	list.lock.Unlock()
 }
 
 // Len 获取链表长度
