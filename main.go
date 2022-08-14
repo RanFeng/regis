@@ -45,10 +45,10 @@ func Executor() {
 			log.Info("moving %v", index)
 			if tcp.Server.DB.GetSDB(index).GetStatus() == base.WorldMoving {
 				tcp.Server.DB.GetSDB(index).MoveData()
-				if tcp.Server.DB.GetSDB(index).GetStatus() == base.WorldNormal {
-					log.Info("fresh %v", index)
-					tcp.Server.DB.FreshNormal()
-				}
+			}
+			if tcp.Server.DB.GetSDB(index).GetStatus() == base.WorldNormal {
+				log.Info("fresh %v", index)
+				tcp.Server.DB.FreshNormal()
 			}
 		}
 
@@ -68,10 +68,8 @@ func main() {
 		}()
 		_ = tcp.ListenAndServer(tcp.Server)
 	}()
-	//client = tcp.MustNewClient(server.GetAddr())
-	go command.LoadRDB(tcp.Server, nil, nil)
+
 	go tcp.Server.LoadRDB(conf.Conf.RDBName)
-	//go loadRDB()
 
 	Executor()
 }

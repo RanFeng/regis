@@ -19,35 +19,41 @@ import (
 // - fake client，用于加载rdb
 // - master client，用于与主库交流
 // RegisClient 与 RegisConn 的区别是：
-// RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
-// RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
+// RegisClient 是本地任意端口连接其他redis服务器，所以远端主库都在 RegisClient
+// RegisConn 是远端任意端口连接本redis服务器，所以远端从库都在 RegisConn
 type RegisClient struct {
+	ID     int64
 	server *RegisServer
-	conn   net.Conn
-	addr   string // server addr
-	//lastBeat time.Time
+	Conn   net.Conn
+
+	Addr     string // remote server Addr
+	LastBeat time.Time
 }
 
-func (cli *RegisClient) GetConn() net.Conn {
-	return cli.conn
+func (cli *RegisClient) RemoteAddr() string {
+	return cli.Conn.RemoteAddr().String()
 }
 
 func (cli *RegisClient) Send(reply base.Reply) {
-	_, _ = cli.conn.Write(reply.Bytes())
+	_, _ = cli.Conn.Write(reply.Bytes())
 }
 
-func (cli *RegisClient) Write(msg []byte) {
-	_, _ = cli.conn.Write(msg)
+func (cli *RegisClient) Write(msg []byte) error {
+	_, err := cli.Conn.Write(msg)
+	if err != nil {
+		cli.Close()
+	}
+	return err
 }
 
 func (cli *RegisClient) Close() {
 	log.Info("client close")
-	_ = cli.conn.Close()
+	_ = cli.Conn.Close()
 }
 
 // Recv 暂时先不处理错误，反正这是假client
 func (cli *RegisClient) Recv() base.Reply {
-	reader := bufio.NewReader(cli.conn)
+	reader := bufio.NewReader(cli.Conn)
 	for {
 		msg, err := reader.ReadBytes('\n')
 		if err != nil {
@@ -68,37 +74,45 @@ func (cli *RegisClient) Recv() base.Reply {
 	}
 }
 
-func (cli *RegisClient) Reply() base.Reply {
-	return redis.ParseReply(cli.conn)
+func (cli *RegisClient) GetReply() base.Reply {
+	return redis.Parse2Reply(cli.Conn)
 }
 
 func (cli *RegisClient) RecvN(buf []byte) (n int, err error) {
-	return io.ReadAtLeast(cli.conn, buf, 1)
+	return io.ReadAtLeast(cli.Conn, buf, 1)
 }
 
 func (cli *RegisClient) RecvAll() (buf []byte, err error) {
 	//io.ReadAtLeast()
-	return io.ReadAll(cli.conn)
+	return io.ReadAll(cli.Conn)
 }
 
-func (cli *RegisClient) Handler() {
-	cli.Send(redis.CmdReply("ping"))
-	if !redis.Equal(cli.Reply(), redis.StrReply("PONG")) {
-		return
+// PartSync 自己是slave，从远端master 增量同步到自己
+func (cli *RegisClient) PartSync() {
+	selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
+	defer selfClient.Close()
+	r := bufio.NewReader(cli.Conn)
+	for {
+		n, query, err := redis.Parse2Inline(r)
+		cli.LastBeat = time.Now()
+		if err != nil {
+			log.Error("PartSync err %v", err)
+			return
+		}
+		Server.SlaveReplOffset += int64(n)
+		Server.MasterReplOffset += int64(n)
+		selfClient.Send(redis.CmdSReply(query...))
+		_ = selfClient.GetReply()
+		//reply := selfClient.GetReply()
+		//log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
 	}
-	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
-	if !redis.Equal(cli.Reply(), redis.OkReply) {
-		return
-	}
-	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
-	if !redis.Equal(cli.Reply(), redis.OkReply) {
-		return
-	}
-	cli.Send(redis.CmdReply("PSYNC", "?", -1))
-	syncInfo := strings.Split(redis.GetString(cli.Reply()), " ")
+}
+
+func (cli *RegisClient) FullSync(replid string, offset int64) {
 	// 接下来master传递一个bulk字符串，用于传输rdb
 	// 先传递一个$509\r\n，其中509表示rdb大小
-	reader := bufio.NewReader(cli.conn)
+	log.Notice("Full resync from master: %v:%v", replid, offset)
+	reader := bufio.NewReader(cli.Conn)
 	msg, err := reader.ReadBytes('\n')
 	if err != nil {
 		return
@@ -107,56 +121,71 @@ func (cli *RegisClient) Handler() {
 	if err != nil {
 		return
 	}
-	log.Info("begin to save %v %v", rdbSize, syncInfo)
 	err = file.SaveFile("dump.rdb", reader, int(rdbSize))
 	if err != nil {
 		log.Error("get rdb fail, err %v", err)
 	}
 	cli.server.LoadRDB("dump.rdb")
-	cli.server.Replid = syncInfo[1]
-	cli.server.Role = RoleSlave
-	offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
-	if err != nil {
-		log.Error("get syncInfo offset fail, err %v", syncInfo)
-	}
-	Server.MasterReplOffset = offset
-	Server.SlaveReplOffset = offset
-	log.Info("slave to %v", cli.server.Replid)
-
-	// 1. 阻塞读conn中的信息
-	// 2. 解析conn中的信息为payload
-	// 3. 一旦形成一个payload，将其转化为Command传入workChan
-	// 4. 等主线程完成再回到1
-
-	// 1. 2. 3. 解析客户端的命令并放入workChan中
-	pC := redis.Parse(cli.conn)
-	selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
-	defer selfClient.Close()
-	for {
-		// 阻塞获取payload
-		pc := <-pC
-		if pc.Err != nil {
-			log.Error("connection err %v", pc.Err)
-			cli.Close()
-			return
-		}
-		Server.SlaveReplOffset += int64(pc.Size)
-		Server.MasterReplOffset += int64(pc.Size)
-		selfClient.Send(redis.CmdSReply(pc.Query...))
-		reply := selfClient.Reply()
-		log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
-		cli.Send(redis.CmdReply("REPLCONF", "ACK", Server.SlaveReplOffset))
-	}
+	cli.server.Replid = replid
+	cli.server.MasterReplOffset = offset
+	cli.server.SlaveReplOffset = offset
+	log.Notice("MASTER <-> REPLICA sync: Finished with success")
+	//log.Notice("Synchronization with replica %v succeeded", cli.RemoteAddr())
 }
+
+func (cli *RegisClient) PSync() {
+	log.Notice("MASTER <-> REPLICA sync started")
+	cli.Send(redis.CmdReply("ping"))
+	if !redis.Equal(cli.GetReply(), redis.StrReply("PONG")) {
+		return
+	}
+	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
+	if !redis.Equal(cli.GetReply(), redis.OkReply) {
+		return
+	}
+	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
+	if !redis.Equal(cli.GetReply(), redis.OkReply) {
+		return
+	}
+	if cli.server.Master == nil {
+		cli.Send(redis.CmdReply("PSYNC", "?", -1))
+	} else {
+		log.Notice("Trying a partial resynchronization (request %v:%v).",
+			cli.server.Replid, cli.server.SlaveReplOffset+1)
+		cli.Send(redis.CmdReply("PSYNC", cli.server.Replid, cli.server.SlaveReplOffset+1))
+	}
+	syncInfo := strings.Split(redis.GetString(cli.GetReply()), " ")
+	if len(syncInfo) == 3 { // 是 full sync
+		tag := strings.ToUpper(syncInfo[0])
+		switch tag {
+		case "FULLRESYNC":
+			offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
+			if err != nil {
+				log.Error("get syncInfo offset fail, err %v", syncInfo)
+			}
+			if offset < 0 {
+				offset = 0
+			}
+			cli.FullSync(syncInfo[1], offset)
+		}
+	}
+	go cli.PartSync()
+	cli.LastBeat = time.Now()
+	cli.server.Role = RoleSlave
+	cli.server.Master = cli
+	log.Info("slave to %v %v %v", cli.server.Replid, cli.RemoteAddr(), cli.server.SlaveReplOffset)
+}
+
 func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	cli := &RegisClient{
+		ID:     utils.GetConnFd(conn),
 		server: server,
-		conn:   conn,
-		addr:   addr,
+		Conn:   conn,
+		Addr:   addr,
 	}
 	return cli, nil
 }
@@ -164,16 +193,17 @@ func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
 func MustNewClient(addr string, server *RegisServer) *RegisClient {
 	cli := &RegisClient{
 		server: server,
-		addr:   addr,
+		Addr:   addr,
 	}
 	var err error
 	for {
-		cli.conn, err = net.Dial("tcp", addr)
+		cli.Conn, err = net.Dial("tcp", addr)
 		if err == nil {
 			break
 		}
 		log.Error("Error condition on socket for SYNC: RegisConn refused %v", addr)
 		time.Sleep(time.Second)
 	}
+	cli.ID = utils.GetConnFd(cli.Conn)
 	return cli
 }

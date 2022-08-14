@@ -84,6 +84,7 @@ func SaveRDB(WriteMDB func(rdb *core.Encoder) error) error {
 	if err != nil {
 		return err
 	}
+	log.Notice("DB saved on disk")
 	return nil
 }
 

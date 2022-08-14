@@ -6,6 +6,7 @@ import (
 	"code/regis/lib/utils"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -300,6 +301,44 @@ func StrReply(str string) *strReply {
 
 func (r *strReply) Bytes() []byte {
 	ret := fmt.Sprintf("%v%v%v", PrefixStr, r.str, CRLF)
+	return []byte(ret)
+}
+
+// inlineSReply 返回一个inline 命令字符串 +set A B\r\n
+type inlineSReply struct {
+	cmd []string
+}
+
+func InlineSReply(cmd ...string) *inlineSReply {
+	return &inlineSReply{
+		cmd: cmd,
+	}
+}
+
+func (r *inlineSReply) Bytes() []byte {
+	s := strings.Join(r.cmd, " ")
+	ret := fmt.Sprintf("%v%v%v", PrefixStr, s, CRLF)
+	return []byte(ret)
+}
+
+// inlineIReply 返回一个inline 命令字符串 +set A B\r\n
+type inlineIReply struct {
+	cmd []interface{}
+}
+
+func InlineIReply(cmd ...interface{}) *inlineIReply {
+	return &inlineIReply{
+		cmd: cmd,
+	}
+}
+
+func (r *inlineIReply) Bytes() []byte {
+	cmds := make([]string, len(r.cmd))
+	for i := range r.cmd {
+		cmds[i] = utils.InterfaceToString(r.cmd[i])
+	}
+	s := strings.Join(cmds, " ")
+	ret := fmt.Sprintf("%v%v%v", PrefixStr, s, CRLF)
 	return []byte(ret)
 }
 

@@ -45,8 +45,11 @@ const (
 type replica struct {
 	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	Replid string
-	Slave  *ds.Dict     // 用于存储slave的client, ip:port -> *RegisConn
-	Master *RegisClient // 用于存储master的client
+	Slave  *ds.Dict // 用于存储slave的client, ip:port -> *RegisConn
+
+	// 用于存储master的client, 如果为nil，表示当前不是slave
+	// 如果与master断开链接，并不能将 Master 置为 nil !!
+	Master *RegisClient
 
 	// 当前节点作为master时，往缓冲区存进去的字节数
 	// 如果不是主从结构，写命令来时不会增加
@@ -64,7 +67,8 @@ type replica struct {
 	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
 	SlaveReplOffset int64
 
-	ReplPingSlavePeriod int // 给slave发心跳包的周期
+	ReplPingSlavePeriod  int // 给slave发心跳包的周期
+	ReplPingMasterPeriod int // 给master发心跳包的周期
 
 	ReplBacklog *ds.RingBuffer
 }
@@ -112,8 +116,8 @@ func (s *RegisServer) SyncSlave(msg []byte) {
 	defer close(ch)
 	for kv := range s.Slave.RangeKV(ch) {
 		cli := kv.Val.(*RegisConn)
-		log.Debug("write cmd to slave %v %v", kv.Key, cli.RemoteAddr())
-		cli.Write(msg) //nolint:errcheck
+		//log.Debug("write cmd to slave %v %v", kv.Key, cli.RemoteAddr())
+		_ = cli.Write(msg)
 	}
 }
 
@@ -127,7 +131,7 @@ func (s *RegisServer) HeartBeatToSlave() {
 		}
 		for kv := range s.Slave.RangeKV(ch) {
 			cli := kv.Val.(*RegisConn)
-			cli.Write(ping) //nolint:errcheck
+			_ = cli.Write(ping)
 			log.Debug("ping to cli %v", cli.RemoteAddr())
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
@@ -146,6 +150,38 @@ func (s *RegisServer) HeartBeatFromSlave() {
 			}
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
+	}
+}
+
+func (s *RegisServer) ReconnectMaster() {
+	cli := MustNewClient(s.Master.Addr, s)
+	cli.PSync()
+}
+
+func (s *RegisServer) HeartBeatToMaster() {
+	var ack base.Reply
+	for {
+		if s.Master != nil {
+			//log.Info("ack to master %v %v", s.Replid, s.SlaveReplOffset)
+			ack = redis.CmdReply("REPLCONF", "ACK", s.SlaveReplOffset)
+			err := s.Master.Write(ack.Bytes())
+			if err != nil { // 主从断开了
+				s.ReconnectMaster()
+			}
+		}
+		time.Sleep(time.Duration(s.ReplPingMasterPeriod) * time.Second)
+	}
+}
+
+func (s *RegisServer) HeartBeatFromMaster() {
+	for {
+		if s.Master != nil {
+			if time.Since(s.Master.LastBeat) > time.Minute {
+				log.Notice("master conn lost")
+				s.ReconnectMaster()
+			}
+		}
+		time.Sleep(time.Duration(s.ReplPingMasterPeriod) * time.Second)
 	}
 }
 
@@ -188,7 +224,7 @@ func (s *RegisServer) CloseConn(id int64) {
 	_ = c.(*RegisConn).Conn.Close()
 	s.Slave.Del(c.(*RegisConn).RemoteAddr())
 	s.semp.Release(1)
-	log.Debug("after close conn %v", s.Who.Len())
+	log.Debug("after close Conn %v", s.Who.Len())
 }
 
 func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
@@ -240,10 +276,13 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 	server.Slave = ds.NewDict(8)
 
 	server.ReplPingSlavePeriod = 10
+	server.ReplPingMasterPeriod = 3
 
 	server.ReplBacklog = nil
 
 	go server.HeartBeatToSlave()
 	go server.HeartBeatFromSlave()
+	go server.HeartBeatToMaster()
+	go server.HeartBeatFromMaster()
 	return server
 }

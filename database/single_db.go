@@ -241,6 +241,7 @@ func (sdb *SingleDB) NotifyMoving(i int) {
 		base.NeedMoving <- i
 	}
 	sdb.status = base.WorldNormal
+	base.NeedMoving <- i
 }
 
 func (sdb *SingleDB) Flush() {
@@ -257,6 +258,10 @@ func (sdb *SingleDB) Flush() {
 
 // MoveData 在bgsave存储完成之后，将 sdb.bgDB 的数据转移到 sdb.db中
 func (sdb *SingleDB) MoveData() {
+	if sdb.bgDB.data.Len() == 0 {
+		sdb.status = base.WorldNormal
+		return
+	}
 	// 每次转移两个Key
 	batch := 2
 	for _, key := range sdb.bgDB.data.RandomKey(batch) {
@@ -275,9 +280,6 @@ func (sdb *SingleDB) MoveData() {
 			sdb.db.data.Put(key, v)
 		}
 		sdb.bgDB.data.Del(key)
-	}
-	if sdb.bgDB.data.Len() == 0 {
-		sdb.status = base.WorldNormal
 	}
 }
 

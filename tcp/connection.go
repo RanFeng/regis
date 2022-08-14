@@ -104,12 +104,12 @@ func (c *RegisConn) Handle() {
 	// 4. 等主线程完成再回到1
 
 	// 1. 2. 3. 解析客户端的命令并放入workChan中
-	pC := redis.Parse(c.Conn)
+	pC := redis.Parse2Payload(c.Conn)
 	for {
 		// 阻塞获取payload
 		pc := <-pC
 		if pc.Err != nil {
-			log.Error("connection err %v", pc.Err)
+			log.Error("connection err %v %v %v", pc.Err, c.ID, c.RemoteAddr())
 			c.Close()
 			return
 		}

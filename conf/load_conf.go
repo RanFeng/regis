@@ -17,7 +17,7 @@ func LoadConf(filePath string) {
 	Conf = &RegisConf{
 		Bind:            "0.0.0.0",
 		Port:            6399,
-		MaxClients:      16,
+		MaxClients:      10000,
 		Databases:       16,
 		RDBName:         "/Users/admin/go/src/code/regis/dump.rdb",
 		ReplBacklogSize: 1048576,

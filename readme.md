@@ -7,15 +7,17 @@
 - [x] RDB save
 - [x] list, but not compatibility with bgsave (need read copy)
 - [x] ring buffer (so easy)
+- [x] redis offset, part, full sync
+- [ ] boot from conf
+- [ ] cascade master-slave
 - [ ] slaveof, PSYNC
 - [ ] master-slave reconnection
 - [ ] set, zset, hash command
-- [ ] redis offset
+
 
 
 
 - [ ] info replication
-- [ ] boot from conf
 - [ ] AOF
 - [ ] master and slave
 - [ ] sentinel

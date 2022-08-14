@@ -6,11 +6,25 @@ import (
 
 type WorldStatus int
 
+func (ws WorldStatus) String() string {
+	switch ws {
+	case WorldNormal:
+		return "normal"
+	case WorldFrozen:
+		return "frozen"
+	case WorldMoving:
+		return "moving"
+	case WorldStopped:
+		return "stopped"
+	}
+	return "unknown"
+}
+
 const (
-	WorldNormal  = iota // 正常读写server.db
-	WorldFrozen         // 已发生BGSave等命令，写命令进入server.bgDB，读命令先读server.bgDB，miss再读server.db
-	WorldMoving         // 此时BGSave命令刚刚完成，正在蚂蚁搬家式地将server.bgDB中的内容写入server.db中
-	WorldStopped        // 此时主线下不再执行任何命令，比如save命令发生时
+	WorldNormal  WorldStatus = iota // 正常读写server.db
+	WorldFrozen                     // 已发生BGSave等命令，写命令进入server.bgDB，读命令先读server.bgDB，miss再读server.db
+	WorldMoving                     // 此时BGSave命令刚刚完成，正在蚂蚁搬家式地将server.bgDB中的内容写入server.db中
+	WorldStopped                    // 此时主线下不再执行任何命令，比如save命令发生时
 )
 
 const (

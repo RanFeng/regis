@@ -3,6 +3,7 @@ package database
 import (
 	"code/regis/base"
 	"code/regis/conf"
+	log "code/regis/lib"
 
 	"github.com/hdt3213/rdb/core"
 )
@@ -58,10 +59,6 @@ func (md *MultiDB) FreshNormal() {
 	md.status = base.WorldNormal
 }
 
-//func (md *MultiDB) Flush() {
-//
-//}
-
 func (md *MultiDB) SaveRDB(rdb *core.Encoder) error {
 	var err error
 	for i := range md.sDB {
@@ -82,6 +79,7 @@ func (md *MultiDB) SaveRDB(rdb *core.Encoder) error {
 		// 让主线程知道这个sdb可以被moving
 		go md.sDB[i].NotifyMoving(i)
 	}
+	log.Notice("Background saving terminated with success")
 	return nil
 }
 

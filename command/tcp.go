@@ -141,14 +141,22 @@ func UnSubscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) ba
 	return redis.ArrayReply(ret)
 }
 
+// ReplicaOf 自己是slave，向master要同步
 func ReplicaOf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
 	_, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return redis.ErrReply("ERR value is not an integer or out of range")
 	}
 
-	server.Master = tcp.MustNewClient(fmt.Sprintf("%v:%v", args[1], args[2]), server)
-	go server.Master.Handler()
+	addr := fmt.Sprintf("%v:%v", args[1], args[2])
+	if server.Master != nil && server.Master.Addr == addr {
+		return redis.ErrReply("ERR already slave")
+	}
+	cli, err := tcp.NewClient(addr, server)
+	if err != nil {
+		return redis.ErrReply("ERR conn fail, check input")
+	}
+	go cli.PSync()
 
 	return redis.OkReply
 }
@@ -162,45 +170,53 @@ func ReplConf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.
 	subCmd := strings.ToLower(args[1])
 	switch subCmd {
 	case "listening-port":
-		//ip, _ := utils.ParseAddr(conn.RemoteAddr())
-		//cli := tcp.MustNewClient(fmt.Sprintf("%v:%v", ip, args[2]), server)
-		//server.Slave.Put(conn.RemoteAddr(), cli)
-		//go server.HeartBeatFromSlave()
+		log.Notice("Replica %v asks for synchronization", conn.RemoteAddr())
 		return redis.OkReply
 	case "capa":
 		return redis.OkReply
 	case "ack":
-		offset, err := strconv.ParseInt(args[2], 10, 64)
-		if err != nil {
-			return redis.IntErrReply
-		}
-		if bs, err := server.ReplBacklog.Read(offset); err == nil {
-			_ = conn.Write(bs)
-		}
 		return nil
 	}
 	return redis.OkReply
 }
 
+// PSync 自己是master，给slave进行同步
 func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return redis.IntErrReply
 	}
-	if args[1] == server.Replid && server.ReplBacklog.Readable(offset) == nil {
-		server.Slave.Put(conn.RemoteAddr(), conn)
-		return redis.StrReply("CONTINUE")
+	offset -= 1
+
+	if args[1] == server.Replid && server.ReplBacklog != nil {
+		log.Info("will do partial sync")
+		bs, err := server.ReplBacklog.Read(offset)
+		if err == nil {
+			_ = conn.Write(redis.InlineSReply("CONTINUE").Bytes())
+			_ = conn.Write(bs)
+			server.Slave.Put(conn.RemoteAddr(), conn)
+			return nil
+		}
+		log.Info("Read err %v %v", offset, err)
 	}
 
+	log.Notice("Full resync requested by replica %v", conn.RemoteAddr())
 	if server.DB.GetStatus() != base.WorldNormal {
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
 	server.DB.SetStatus(base.WorldFrozen)
-	server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	if server.ReplBacklog == nil {
+		server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	}
+
+	_ = conn.Write(redis.InlineIReply("FULLRESYNC", server.Replid, server.MasterReplOffset).Bytes())
+
 	go func() {
+		log.Notice("Starting BGSAVE for SYNC with target: disk")
 		offsetBak := server.MasterReplOffset
 		conn.Status = base.ConnSync
 		go func() {
+			// 防止在传输rdb过程中，长时间不给slave发心跳包，导致slave以为master挂了
 			for conn.Status == base.ConnSync {
 				err := conn.Write([]byte{'\n'})
 				if err != nil {
@@ -220,25 +236,7 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 			_, _ = conn.Conn.Write(bs)
 		}
 	}()
-	log.Info("not replid, need full sync")
-	return redis.StrReply(fmt.Sprintf("FULLRESYNC %v %v", server.Replid, server.MasterReplOffset))
-}
-
-func LoadRDB(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
-	server.FlushDB()
-	query := file.LoadRDB(conf.Conf.RDBName)
-	//payload := redis.Payload{
-	//	Query: nil,
-	//	Err: nil,
-	//}
-	for i := range query {
-		//payload.Query = query[i]
-		//server.workChan <- payload
-		tcp.Client.Send(redis.CmdReply(query[i]...))
-		//Client.Recv()
-	}
-	//client.Close()
-	return redis.OkReply
+	return nil
 }
 
 func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
@@ -246,7 +244,7 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	switch sub {
 	case "reload":
 		Save(server, nil, nil)
-		LoadRDB(server, nil, nil)
+		server.LoadRDB(conf.Conf.RDBName)
 	case "object":
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
@@ -256,6 +254,14 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 			return redis.ErrReply("ERR no such key")
 		}
 		return redis.StrReply(fmt.Sprintf("Value at:%p %v", &v, v))
+	case "db":
+		ret := []interface{}{fmt.Sprintf("mdb have %v SDBs, now is %v", server.DB.GetSpaceNum(), server.DB.GetStatus())}
+		for i := 0; i < server.DB.GetSpaceNum(); i++ {
+			sdb := server.DB.GetSDB(i)
+			ret = append(ret, fmt.Sprintf("sdb %2d is %v have %v keys, %v is bgsave",
+				i, sdb.GetStatus(), sdb.Size(), sdb.ShadowSize()))
+		}
+		return redis.ArrayReply(ret)
 	case "populate":
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
@@ -309,8 +315,13 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		for v := range server.Who.Range(ch) {
 			val := v.(*tcp.RegisConn)
 			_, ok := server.Slave.Get(val.RemoteAddr())
-			info := fmt.Sprintf("id: %v, addr: %v, db_index: %v is_slave: %v, last_at: %v",
+			info := fmt.Sprintf("id: %v, addr: %v, db_index: %v, is_slave: %v, last_at: %v",
 				val.ID, val.RemoteAddr(), val.DBIndex, ok, val.LastBeat)
+			ret = append(ret, info)
+		}
+		if server.Master != nil {
+			info := fmt.Sprintf("master: id: %v, addr: %v, last_at: %v",
+				server.Master.ID, server.Master.RemoteAddr(), server.Master.LastBeat)
 			ret = append(ret, info)
 		}
 		return redis.InterfacesReply(ret)
