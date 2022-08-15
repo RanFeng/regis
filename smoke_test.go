@@ -18,7 +18,7 @@ var (
 func TestMain(m *testing.M) {
 	go main()
 	time.Sleep(200 * time.Millisecond)
-	cli, err = tcp.NewClient(tcp.Server.GetAddr(), nil)
+	cli, err = tcp.NewClient(tcp.Server.Address, nil)
 	if err != nil {
 		log.Error("new fake client fail %v", err)
 		return

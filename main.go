@@ -7,7 +7,6 @@ import (
 	log "code/regis/lib"
 	"code/regis/redis"
 	"code/regis/tcp"
-	"sync/atomic"
 	"time"
 )
 
@@ -37,10 +36,6 @@ func Executor() {
 					cmd.Reply = cmdInfo.Exec(tcp.Server, cmd.Conn, cmd.Query)
 					if tcp.Server.ReplBacklog.IsActive() && cmdInfo.HasAttr(base.CmdWrite) {
 						cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
-						//log.Info("add from here1 %v %v %v %v %v", tcp.Server.MasterReplOffset,
-						//cmd.Conn.ID, cmd.Conn.RemoteAddr(), tcp.Client.ID, tcp.Client.LocalAddr())
-						atomic.AddInt64(&tcp.Server.MasterReplOffset, tcp.Server.ReplBacklog.Write(cmdBs))
-						//log.Info("add from here2 %v", tcp.Server.MasterReplOffset)
 						tcp.Server.SyncSlave(cmdBs)
 					}
 				}

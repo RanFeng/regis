@@ -3,7 +3,6 @@ package command
 import (
 	"code/regis/base"
 	"code/regis/conf"
-	"code/regis/ds"
 	"code/regis/file"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
@@ -72,41 +71,36 @@ func BGSave(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Re
 }
 
 func Publish(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
-	dict := server.GetPubSub()
-	val, ok := dict.Get(args[1])
+	subs, ok := server.PubsubDict[args[1]]
 	if !ok {
 		return redis.IntReply(0)
 	}
-	list := val.(*ds.LinkedList)
+
 	reply := redis.ArrayReply([]interface{}{
 		_msg, args[1], args[2],
 	})
 
-	ch := make(chan struct{})
-	defer close(ch)
-	for item := range list.Range(ch) {
-		item.(*tcp.RegisConn).Reply(reply)
+	for k := range subs {
+		subs[k].Reply(reply)
 	}
 
-	return redis.IntReply(int(list.Len()))
+	return redis.IntReply(len(subs))
 }
 
 func Subscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
-	dict := server.GetPubSub()
 	ret := make([]interface{}, 0, len(args)*3)
 	for i := 1; i < len(args); i++ {
 		// 获取server的订阅dict
-		val, ok := dict.Get(args[i])
+		subs, ok := server.PubsubDict[args[i]]
 		if !ok {
-			val = ds.NewLinkedList()
+			subs = make(map[int64]*tcp.RegisConn, 16)
 		}
-		list := val.(base.LList)
 		// 将conn加入server的订阅dict
-		list.PushTail(conn)
-		dict.Put(args[i], list)
+		subs[conn.ID] = conn
+		server.PubsubDict[args[i]] = subs
 
 		// conn自己更新自己的订阅dict
-		conn.PubsubList.PushTail(args[i])
+		conn.PubsubList[args[i]] = struct{}{}
 
 		ret = append(ret, _sub, args[i], i-1)
 	}
@@ -115,29 +109,23 @@ func Subscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base
 }
 
 func UnSubscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
-	dict := server.GetPubSub()
 	if len(args) == 1 {
-		ch := make(chan struct{})
-		for val := range conn.PubsubList.Range(ch) {
-			args = append(args, val.(string))
+		for key := range conn.PubsubList {
+			args = append(args, key)
 		}
 	}
 	ret := make([]interface{}, 0, len(args)*3)
-	for i := 1; i < len(args); i++ {
+	for i := range args[1:] {
 		// 获取server的订阅dict
-		if val, ok := dict.Get(args[i]); ok {
+		if subs, ok := server.PubsubDict[args[i]]; ok {
 			// 将conn从server的订阅list中删除
-			val.(base.LList).RemoveFirst(func(c interface{}) bool {
-				return conn.ID == c.(*tcp.RegisConn).ID
-			})
+			delete(subs, conn.ID)
 		}
 
 		// conn自己更新自己的订阅list，取消订阅该频道
-		conn.PubsubList.RemoveFirst(func(s interface{}) bool {
-			return args[i] == s.(string)
-		})
+		delete(conn.PubsubList, args[i])
 
-		ret = append(ret, _unsub, args[i], i-1)
+		ret = append(ret, _unsub, args[i], i)
 	}
 	return redis.ArrayReply(ret)
 }
@@ -229,7 +217,7 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		if err == nil {
 			_ = conn.Write(redis.InlineSReply("CONTINUE").Bytes())
 			_ = conn.Write(bs)
-			server.Slave.Put(conn.ID, conn)
+			server.Slave[conn.ID] = conn
 			return nil
 		}
 	}
@@ -261,7 +249,7 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		//}()
 		_ = file.SaveRDB(server.DB.SaveRDB)
 		file.SendRDB(conf.Conf.RDBName, conn.Conn)
-		server.Slave.Put(conn.ID, conn)
+		server.Slave[conn.ID] = conn
 		conn.Status = base.ConnNormal
 		// 对增量进行同步
 		if bs, err := server.ReplBacklog.Read(offsetBak); err == nil {
@@ -346,9 +334,8 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		ret := []interface{}{}
 		ch := make(chan struct{})
 		defer close(ch)
-		for kv := range server.Who.RangeKV(ch) {
-			val := kv.Val.(*tcp.RegisConn)
-			_, ok := server.Slave.Get(val.ID)
+		for _, val := range server.Who {
+			_, ok := server.Slave[val.ID]
 			info := fmt.Sprintf("id: %v, addr: %v, db_index: %v, is_slave: %v, last_at: %v",
 				val.ID, val.RemoteAddr(), val.DBIndex, ok, val.LastBeat)
 			ret = append(ret, info)
@@ -361,10 +348,7 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		return redis.InterfacesReply(ret)
 	case "slave":
 		ret := []interface{}{}
-		ch := make(chan struct{})
-		defer close(ch)
-		for v := range server.Slave.RangeKV(ch) {
-			val := v.Val.(*tcp.RegisConn)
+		for _, val := range server.Slave {
 			info := fmt.Sprintf("id: %v, db_index: %v status：%v, addr: %v",
 				val.ID, val.DBIndex, val.Status, val.RemoteAddr())
 			ret = append(ret, info)
@@ -374,7 +358,11 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
 		}
-		server.CloseConn(args[2])
+		port, err := strconv.ParseInt(args[2], 10, 64)
+		if err != nil {
+			return redis.ErrReply("ERR value is out of range, must be positive")
+		}
+		server.CloseConn(port)
 		return redis.OkReply
 	}
 	return redis.ErrReply(fmt.Sprintf("ERR Unknown subcommand or wrong number of arguments for '%v'. Try DEBUG HELP.", args[1]))

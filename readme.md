@@ -15,6 +15,8 @@
 - [ ] set, zset, hash command
 
 
+- [x] release some key struct dependencies to ds
+- [ ] use time event? or multi goroutine?
 
 
 - [ ] info replication

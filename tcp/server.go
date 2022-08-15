@@ -47,7 +47,7 @@ type replica struct {
 	// 当自己又是slave又是master时，说明自己是个slave
 	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	Replid string
-	Slave  *ds.Dict // 用于存储slave的connection, RegisConn.ID -> *RegisConn
+	Slave  map[int64]*RegisConn // 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
 
 	// 用于存储master的client, 如果为nil，表示当前不是slave
 	// 如果与master断开链接，并不能将 Master 置为 nil !!
@@ -77,12 +77,12 @@ type replica struct {
 type safety struct {
 	Lock       sync.Mutex // 对 RegisServer.Who, RegisServer.Slave 操作的锁
 	Monopolist string
-	semp       *semaphore.Weighted // 用于控制最大客户端连接数量
-	Who        *ds.Dict            // 存储已连接的connection，RegisConn.ID -> *RegisConn
+	semp       *semaphore.Weighted  // 用于控制最大客户端连接数量
+	Who        map[int64]*RegisConn // 存储已连接的connection，RegisConn.ID -> *RegisConn
 }
 
 type RegisServer struct {
-	address    string
+	Address    string
 	maxClients int64
 
 	replica
@@ -93,9 +93,9 @@ type RegisServer struct {
 
 	workChan chan *Command // 用于给主协程输送命令的
 
-	// 保存所有频道的订阅关系 channel -> Who(base.Connection)
-	pubsubDict    *ds.Dict
-	pubsubPattern *ds.LinkedList
+	// PubsubDict 保存所有频道的订阅关系 channel -> RegisConn.ID -> *RegisConn
+	PubsubDict map[string]map[int64]*RegisConn
+	//pubsubPattern *ds.LinkedList
 }
 
 func (s *RegisServer) PassExec(c *RegisConn) bool {
@@ -103,14 +103,6 @@ func (s *RegisServer) PassExec(c *RegisConn) bool {
 		return true
 	}
 	return c.RemoteAddr() == s.Monopolist
-}
-
-func (s *RegisServer) GetAddr() string {
-	return s.address
-}
-
-func (s *RegisServer) FlushDB() {
-	s.DB = database.NewMultiDB()
 }
 
 func (s *RegisServer) LoadRDB(fn string) {
@@ -124,15 +116,13 @@ func (s *RegisServer) LoadRDB(fn string) {
 }
 
 func (s *RegisServer) SyncSlave(msg []byte) {
-	if s.Slave.Len() == 0 {
+	atomic.AddInt64(&s.MasterReplOffset, s.ReplBacklog.Write(msg))
+	log.Info("SyncSlave now %v", Server.MasterReplOffset)
+	if len(s.Slave) == 0 {
 		return
 	}
-	ch := make(chan struct{})
-	defer close(ch)
-	for kv := range s.Slave.RangeKV(ch) {
-		cli := kv.Val.(*RegisConn)
-		//log.Debug("write cmd to slave %v %v", kv.Key, cli.RemoteAddr())
-		_ = cli.Write(msg)
+	for k := range s.Slave {
+		_ = s.Slave[k].Write(msg)
 	}
 }
 
@@ -141,17 +131,9 @@ func (s *RegisServer) SyncSlave(msg []byte) {
 // 当自己是slave，同时也是别的机器的master时，就不用告知了
 //   上面的master会发出ping包，我转发那个ping包就行
 func (s *RegisServer) HeartBeatToSlave() {
-	ch := make(chan struct{})
-	ping := redis.CmdReply("ping").Bytes()
 	for {
 		if s.Role == RoleMaster {
-			for kv := range s.Slave.RangeKV(ch) {
-				cli := kv.Val.(*RegisConn)
-				_ = cli.Write(ping)
-				log.Debug("ping to cli %v", cli.RemoteAddr())
-			}
-			atomic.AddInt64(&Server.MasterReplOffset, Server.ReplBacklog.Write(ping))
-			log.Info("HeartBeatToSlave add MasterReplOffset %v", Server.MasterReplOffset)
+			s.SyncSlave(redis.CmdReply("ping").Bytes())
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
 	}
@@ -162,13 +144,11 @@ func (s *RegisServer) HeartBeatToSlave() {
 //   如果超出时间，slave没有朝我发送心跳包时，就当它没了，要关闭。
 // 当自己是slave，同时也是别的机器的master时，也要监听自己的slave的存活状态
 func (s *RegisServer) HeartBeatFromSlave() {
-	ch := make(chan struct{})
 	for {
-		for kv := range s.Slave.RangeKV(ch) {
-			cli := kv.Val.(*RegisConn)
+		for key, cli := range s.Slave {
 			if time.Since(cli.LastBeat) > time.Minute {
 				log.Error("MASTER <-> REPLICA sync timeout")
-				s.Slave.Del(kv.Key)
+				delete(s.Slave, key)
 				cli.Close()
 			}
 		}
@@ -218,13 +198,6 @@ func (s *RegisServer) GetWorkChan() <-chan *Command {
 	return s.workChan
 }
 
-func (s *RegisServer) GetPubSub() *ds.Dict {
-	return s.pubsubDict
-}
-func (s *RegisServer) GetPPubSub() *ds.LinkedList {
-	return s.pubsubPattern
-}
-
 func (s *RegisServer) GetInfo() string {
 	serverInfo := `# RegisServer
 role:%v
@@ -234,22 +207,22 @@ slave_repl_offset:%v
 run_id:%v
 tcp_port:%v
 `
-	port := strings.Split(s.address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.Role, s.Slave.Len(),
+	port := strings.Split(s.Address, ":")[1]
+	return fmt.Sprintf(serverInfo, s.Role, len(s.Slave),
 		atomic.LoadInt64(&s.MasterReplOffset), atomic.LoadInt64(&s.SlaveReplOffset), s.Replid, port)
 }
 
-func (s *RegisServer) CloseConn(ids ...string) {
+func (s *RegisServer) CloseConn(ids ...int64) {
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
 	for _, id := range ids {
-		c, ok := s.Who.Get(id)
+		c, ok := s.Who[id]
 		if !ok {
-			return
+			continue
 		}
-		s.Who.Del(id)
-		_ = c.(*RegisConn).Conn.Close()
-		s.Slave.Del(id)
+		delete(s.Who, id)
+		delete(s.Slave, id)
+		_ = c.Conn.Close()
 		s.semp.Release(1)
 	}
 }
@@ -264,7 +237,7 @@ func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
 	c := NewConnection(conn, s)
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
-	s.Who.Put(c.ID, c)
+	s.Who[c.ID] = c
 	//log.Debug("get client now is %v", s.Who.Len())
 }
 
@@ -275,7 +248,7 @@ func ListenAndServer(server *RegisServer) error {
 	if err != nil {
 		return err
 	}
-	Client = MustNewClient(Server.GetAddr(), Server)
+	Client = MustNewClient(Server.Address, Server)
 	go Server.LoadRDB(conf.Conf.RDBName)
 	for {
 		conn, err := listener.Accept()
@@ -290,19 +263,19 @@ func ListenAndServer(server *RegisServer) error {
 func InitServer(prop *conf.RegisConf) *RegisServer {
 	server := &RegisServer{}
 	server.Replid = utils.GetRandomHexChars(40)
-	server.address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
+	server.Address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
-	server.Who = ds.NewDict(conf.Conf.MaxClients, true)
+	server.Who = make(map[int64]*RegisConn, conf.Conf.MaxClients)
 	server.DB = database.NewMultiDB()
 
 	server.semp = semaphore.NewWeighted(prop.MaxClients)
 	server.workChan = make(chan *Command)
 
-	server.pubsubDict = ds.NewDict(128, false)
-	server.pubsubPattern = ds.NewLinkedList()
+	server.PubsubDict = make(map[string]map[int64]*RegisConn, 128)
+	//server.pubsubPattern = ds.NewLinkedList()
 
-	server.Slave = ds.NewDict(8, true)
+	server.Slave = make(map[int64]*RegisConn, 8)
 
 	server.ReplPingSlavePeriod = 10
 	server.ReplPingMasterPeriod = 3

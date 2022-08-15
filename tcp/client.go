@@ -23,7 +23,7 @@ import (
 // RegisClient 是本地任意端口连接其他redis服务器，所以远端主库都在 RegisClient
 // RegisConn 是远端任意端口连接本redis服务器，所以远端从库都在 RegisConn
 type RegisClient struct {
-	ID     string
+	ID     int64
 	server *RegisServer
 	Conn   net.Conn
 
@@ -145,7 +145,9 @@ func (cli *RegisClient) FullSync(replid string, offset int64) {
 	atomic.SwapInt64(&cli.server.MasterReplOffset, offset)
 	atomic.SwapInt64(&cli.server.SlaveReplOffset, offset)
 
-	cli.server.CloseConn(cli.server.Slave.GetAllKeys()...)
+	for k := range cli.server.Slave {
+		cli.server.CloseConn(k)
+	}
 	log.Notice("MASTER <-> REPLICA sync: Finished with success")
 	//log.Notice("Synchronization with replica %v succeeded", cli.RemoteAddr())
 }
@@ -200,7 +202,7 @@ func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
 		return nil, err
 	}
 	cli := &RegisClient{
-		ID:     strconv.FormatInt(utils.GetConnFd(conn), 10),
+		ID:     utils.GetConnFd(conn),
 		server: server,
 		Conn:   conn,
 		Addr:   addr,
@@ -222,6 +224,6 @@ func MustNewClient(addr string, server *RegisServer) *RegisClient {
 		log.Error("Error condition on socket for SYNC: RegisConn refused %v", addr)
 		time.Sleep(time.Second)
 	}
-	cli.ID = strconv.FormatInt(utils.GetConnFd(cli.Conn), 10)
+	cli.ID = utils.GetConnFd(cli.Conn)
 	return cli
 }

@@ -2,12 +2,10 @@ package tcp
 
 import (
 	"code/regis/base"
-	"code/regis/ds"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
 	"code/regis/redis"
 	"net"
-	"strconv"
 	"time"
 )
 
@@ -24,7 +22,7 @@ type Command struct {
 // RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
 // RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
 type RegisConn struct {
-	ID   string
+	ID   int64
 	Conn net.Conn
 
 	// 一般来说都是 base.ConnNormal 的状态
@@ -40,9 +38,9 @@ type RegisConn struct {
 
 	LastBeat time.Time
 
-	// 存储客户端订阅的频道
-	PubsubList    *ds.LinkedList
-	PubsubPattern *ds.LinkedList
+	// 存储客户端订阅的频道 channel -> struct{}
+	PubsubList map[string]struct{}
+	//PubsubPattern *ds.LinkedList
 }
 
 func (c *RegisConn) RemoteAddr() string {
@@ -56,27 +54,15 @@ func (c *RegisConn) Close() {
 }
 
 func (c *RegisConn) UnSubscribeAll() {
-	dict := c.server.GetPubSub()
-	args := make([]string, 0, c.PubsubList.Len())
-
-	ch := make(chan struct{})
-	for val := range c.PubsubList.Range(ch) {
-		args = append(args, val.(string))
-	}
-
-	for i := 1; i < len(args); i++ {
+	for key := range c.PubsubList {
 		// 获取server的订阅dict
-		if val, ok := dict.Get(args[i]); ok {
+		if subs, ok := c.server.PubsubDict[key]; ok {
 			// 将conn从server的订阅list中删除
-			val.(base.LList).RemoveFirst(func(conn interface{}) bool {
-				return c.ID == conn.(*RegisConn).ID
-			})
+			delete(subs, c.ID)
 		}
 
 		// conn自己更新自己的订阅list，取消订阅该频道
-		c.PubsubList.RemoveFirst(func(s interface{}) bool {
-			return args[i] == s.(string)
-		})
+		delete(c.PubsubList, key)
 	}
 }
 
@@ -137,15 +123,15 @@ func (c *RegisConn) CmdDone(cmd *Command) {
 }
 
 func NewConnection(conn net.Conn, server *RegisServer) *RegisConn {
-	log.Debug("get Conn client %v", utils.GetConnFd(conn))
 	c := &RegisConn{
-		ID:            strconv.FormatInt(utils.GetConnFd(conn), 10),
-		Conn:          conn,
-		server:        server,
-		doneChan:      make(chan *Command),
-		PubsubList:    ds.NewLinkedList(),
-		PubsubPattern: ds.NewLinkedList(),
+		ID:         utils.GetConnFd(conn),
+		Conn:       conn,
+		server:     server,
+		doneChan:   make(chan *Command),
+		PubsubList: make(map[string]struct{}),
+		//PubsubPattern: ds.NewLinkedList(),
 	}
+	log.Debug("get Conn client %v", c.ID)
 	go c.Handle()
 	return c
 }
