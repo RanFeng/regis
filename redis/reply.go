@@ -22,6 +22,11 @@ func GetString(r base.Reply) string {
 	return string(rb[1 : len(rb)-2])
 }
 
+func GetInline(r base.Reply) []string {
+	rb := r.Bytes()
+	return strings.Split(string(rb[1:len(rb)-2]), " ")
+}
+
 func GetInt(r base.Reply) int {
 	rb := r.Bytes()
 	rs := string(rb[1 : len(rb)-2])

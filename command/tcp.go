@@ -134,7 +134,7 @@ func UnSubscribe(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) ba
 func ReplicaOf(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Reply {
 	if args[1] == "no" && args[2] == "one" {
 		if server.Master != nil {
-			server.Role = tcp.RoleMaster
+			server.ReplBacklog.Active = false
 			server.Master.Close()
 			server.Master = nil
 		}
@@ -211,10 +211,11 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	}
 	offset -= 1
 
-	if args[1] == server.Replid && server.ReplBacklog.IsActive() {
-		log.Info("try partial sync")
+	if args[1] == server.Replid && server.ReplBacklog.Active {
+		log.Info("try partial sync %v", offset)
 		bs, err := server.ReplBacklog.Read(offset)
 		if err == nil {
+			log.Info("I'm sending %v !!", utils.BytesViz(bs))
 			_ = conn.Write(redis.InlineSReply("CONTINUE").Bytes())
 			_ = conn.Write(bs)
 			server.Slave[conn.ID] = conn
@@ -228,7 +229,7 @@ func PSync(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	}
 	server.DB.SetStatus(base.WorldFrozen)
 
-	server.ReplBacklog.SetStatus(true)
+	server.ReplBacklog.Active = true
 
 	_ = conn.Write(redis.InlineIReply("FULLRESYNC", server.Replid, atomic.LoadInt64(&server.MasterReplOffset)).Bytes())
 
@@ -263,9 +264,11 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 	sub := strings.ToLower(args[1])
 	switch sub {
 	case "reload":
-		Save(server, nil, nil)
-		server.DB.Flush()
-		server.LoadRDB(conf.Conf.RDBName)
+		go func() {
+			Save(server, nil, nil)
+			server.DB.Flush()
+			server.LoadRDB(conf.Conf.RDBName)
+		}()
 		return redis.OkReply
 	case "object":
 		if len(args) < 3 {
@@ -318,7 +321,7 @@ func Debug(server *tcp.RegisServer, conn *tcp.RegisConn, args []string) base.Rep
 		if len(args) < 3 {
 			return redis.ArgNumErrReply(args[0])
 		}
-		if server.ReplBacklog.IsActive() {
+		if !server.ReplBacklog.Active {
 			return redis.NilReply
 		}
 		num, err := strconv.ParseInt(args[2], 10, 64)

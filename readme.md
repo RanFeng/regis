@@ -17,7 +17,8 @@
 
 - [x] release some key struct dependencies to ds
 - [ ] use time event? or multi goroutine?
-
+- [ ] 遗留一个bug，当slave断开一段时间后再连接，尽管master send了断点的部分，但是slave还是收不到，
+  redis作为master，regis作为slave的时候，没问题。说明接收没有问题。要试试regis作为master而redis作为slave时的表现。
 
 - [ ] info replication
 - [ ] AOF

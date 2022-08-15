@@ -26,26 +26,7 @@ var (
 	Client *RegisClient
 )
 
-type RoleType int
-
-func (r RoleType) String() string {
-	switch r {
-	case RoleMaster:
-		return "master"
-	case RoleSlave:
-		return "slave"
-	}
-	return "unknown"
-}
-
-const (
-	RoleMaster RoleType = iota
-	RoleSlave
-)
-
 type replica struct {
-	// 当自己又是slave又是master时，说明自己是个slave
-	Role   RoleType // RoleMaster -> master, RoleSlave -> slave
 	Replid string
 	Slave  map[int64]*RegisConn // 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
 
@@ -107,20 +88,22 @@ func (s *RegisServer) PassExec(c *RegisConn) bool {
 
 func (s *RegisServer) LoadRDB(fn string) {
 	Client.Send(redis.CmdReply("lock"))
+	_ = Client.GetReply()
 	query := file.LoadRDB(fn)
 	for i := range query {
 		Client.Send(redis.CmdReply(query[i]...))
 		_ = Client.GetReply()
 	}
 	Client.Send(redis.CmdReply("unlock"))
+	_ = Client.GetReply()
 }
 
 func (s *RegisServer) SyncSlave(msg []byte) {
 	atomic.AddInt64(&s.MasterReplOffset, s.ReplBacklog.Write(msg))
-	log.Info("SyncSlave now %v", Server.MasterReplOffset)
 	if len(s.Slave) == 0 {
 		return
 	}
+	log.Info("SyncSlave now %v", Server.MasterReplOffset)
 	for k := range s.Slave {
 		_ = s.Slave[k].Write(msg)
 	}
@@ -132,7 +115,7 @@ func (s *RegisServer) SyncSlave(msg []byte) {
 //   上面的master会发出ping包，我转发那个ping包就行
 func (s *RegisServer) HeartBeatToSlave() {
 	for {
-		if s.Role == RoleMaster {
+		if s.Master == nil {
 			s.SyncSlave(redis.CmdReply("ping").Bytes())
 		}
 		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
@@ -200,16 +183,30 @@ func (s *RegisServer) GetWorkChan() <-chan *Command {
 
 func (s *RegisServer) GetInfo() string {
 	serverInfo := `# RegisServer
-role:%v
-connected_slaves:%v
-master_repl_offset:%v
-slave_repl_offset:%v
-run_id:%v
-tcp_port:%v
+tcp_port:%s
+run_id:%s
+role:%s
+connected_slaves:%d
+master_repl_offset:%d
+slave_repl_offset:%d
+repl_backlog_active:%v
+repl_backlog_size:%d
+repl_backlog_first_byte_offset:%v
+repl_backlog_histlen:%v
 `
 	port := strings.Split(s.Address, ":")[1]
-	return fmt.Sprintf(serverInfo, s.Role, len(s.Slave),
-		atomic.LoadInt64(&s.MasterReplOffset), atomic.LoadInt64(&s.SlaveReplOffset), s.Replid, port)
+	return fmt.Sprintf(serverInfo,
+		port,
+		s.Replid,
+		utils.IF(s.Master == nil, "master", "slave"),
+		len(s.Slave),
+		s.MasterReplOffset,
+		s.SlaveReplOffset,
+		s.ReplBacklog.Active,
+		s.ReplBacklog.Size,
+		s.ReplBacklog.StartPtr,
+		s.ReplBacklog.HistLen,
+	)
 }
 
 func (s *RegisServer) CloseConn(ids ...int64) {

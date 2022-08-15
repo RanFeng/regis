@@ -41,6 +41,14 @@ func ParseAddr(addr string) (ip, port string) {
 	return s[0], s[1]
 }
 
+// IF 三元操作符 cond ? v1 : v2
+func IF(cond bool, v1 interface{}, v2 interface{}) interface{} {
+	if cond {
+		return v1
+	}
+	return v2
+}
+
 func InterfaceToBytes(val interface{}) []byte {
 	return []byte(InterfaceToString(val))
 }

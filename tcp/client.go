@@ -98,7 +98,9 @@ func (cli *RegisClient) PartSync() {
 	//defer selfClient.Close()
 	r := bufio.NewReader(cli.Conn)
 	for {
+		log.Info("I'm listen master cmd %v", cli.Conn.LocalAddr())
 		n, query, err := redis.Parse2Inline(r)
+		log.Info("PartSync ing, %v", query)
 		cli.LastBeat = time.Now()
 		if err != nil {
 			log.Error("PartSync err %v", err)
@@ -132,15 +134,17 @@ func (cli *RegisClient) FullSync(replid string, offset int64) {
 	if err != nil {
 		log.Error("get rdb fail, err %v", err)
 	}
-	//Client.Send(redis.CmdReply("FLUSHALL"))
 
+	// 清掉自己所有的历史数据
 	cli.server.DB.Flush()
-	cli.server.ReplBacklog.Clear()
-	cli.server.ReplBacklog.SetStatus(false)
+	cli.server.ReplBacklog.Reset(offset)
 
+	// set false 让load rdb的命令不至于写入到ReplBacklog中
+	cli.server.ReplBacklog.Active = false
+
+	// 同步地load rdb，也就是说这个函数退出时，rdb就已经完全load完毕
 	cli.server.LoadRDB(conf.Conf.RDBName)
 
-	cli.server.Role = RoleSlave
 	cli.server.Replid = replid
 	atomic.SwapInt64(&cli.server.MasterReplOffset, offset)
 	atomic.SwapInt64(&cli.server.SlaveReplOffset, offset)
@@ -174,7 +178,9 @@ func (cli *RegisClient) PSync() {
 		cli.server.Replid, cli.server.SlaveReplOffset+1)
 	cli.Send(redis.CmdReply("PSYNC", cli.server.Replid, cli.server.SlaveReplOffset+1))
 	//}
-	syncInfo := strings.Split(redis.GetString(cli.GetReply()), " ")
+	reply := redis.GetString(cli.GetReply())
+	log.Info("get master reply, %v", reply)
+	syncInfo := strings.Split(reply, " ")
 	if len(syncInfo) == 3 { // 是 full sync
 		tag := strings.ToUpper(syncInfo[0])
 		switch tag {
@@ -189,10 +195,11 @@ func (cli *RegisClient) PSync() {
 			cli.FullSync(syncInfo[1], offset)
 		}
 	}
+
 	go cli.PartSync()
-	cli.LastBeat = time.Now()
-	cli.server.ReplBacklog.SetStatus(true)
 	cli.server.Master = cli
+	cli.LastBeat = time.Now()
+	cli.server.ReplBacklog.Active = true
 	log.Info("slave to %v %v %v", cli.server.Replid, cli.RemoteAddr(), cli.server.SlaveReplOffset)
 }
 
