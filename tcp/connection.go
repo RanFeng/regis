@@ -16,31 +16,32 @@ type Command struct {
 	Err   error
 }
 
+type replicaForRegisConn struct {
+	// 作为slave的状态
+	State int
+
+	LastBeat time.Time
+}
+
 // RegisConn
 // - 用于管理客户端来的连接
 // RegisClient 与 RegisConn 的区别是：
-// RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient
-// RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn
+// RegisClient 是本地任意端口连接其他redis服务器，所以主库都在 RegisClient, master都是在 RegisClient的远端
+// RegisConn 是远端任意端口连接本redis服务器，所以从库都在 RegisConn, slave都是在 RegisConn 的远端
 type RegisConn struct {
 	ID   int64
 	Conn net.Conn
-
-	// 一般来说都是 base.ConnNormal 的状态
-	// 当 RegisConn 作为从库，且正在与主库进行rdb同步时，状态为 base.ConnSync
-	Status int
-
-	server *RegisServer
 
 	//name      string // 客户端名字
 	DBIndex int // 客户端连上的db_index
 
 	doneChan chan *Command
 
-	LastBeat time.Time
-
 	// 存储客户端订阅的频道 channel -> struct{}
 	PubsubList map[string]struct{}
 	//PubsubPattern *ds.LinkedList
+
+	replicaForRegisConn
 }
 
 func (c *RegisConn) RemoteAddr() string {
@@ -50,13 +51,13 @@ func (c *RegisConn) RemoteAddr() string {
 func (c *RegisConn) Close() {
 	log.Info("connection close")
 	c.UnSubscribeAll()
-	c.server.CloseConn(c.ID)
+	Server.CloseConn(c.ID)
 }
 
 func (c *RegisConn) UnSubscribeAll() {
 	for key := range c.PubsubList {
 		// 获取server的订阅dict
-		if subs, ok := c.server.PubsubDict[key]; ok {
+		if subs, ok := Server.PubsubDict[key]; ok {
 			// 将conn从server的订阅list中删除
 			delete(subs, c.ID)
 		}
@@ -106,7 +107,7 @@ func (c *RegisConn) Handle() {
 			Query: pc.Query,
 		}
 		// 将Command放入工作队列中，等待主协程完成
-		c.server.workChan <- cmd
+		Server.workChan <- cmd
 		// 4. 阻塞等待cmd完成
 		doneCMD := <-c.doneChan
 		if doneCMD.Err != nil {
@@ -122,11 +123,10 @@ func (c *RegisConn) CmdDone(cmd *Command) {
 	c.doneChan <- cmd
 }
 
-func NewConnection(conn net.Conn, server *RegisServer) *RegisConn {
+func NewConnection(conn net.Conn) *RegisConn {
 	c := &RegisConn{
 		ID:         utils.GetConnFd(conn),
 		Conn:       conn,
-		server:     server,
 		doneChan:   make(chan *Command),
 		PubsubList: make(map[string]struct{}),
 		//PubsubPattern: ds.NewLinkedList(),

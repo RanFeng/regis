@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-type ExecFunc func(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply
+type ExecFunc func(c *tcp.RegisConn, args []string) base.Reply
 
 var CmdTable = make(map[string]*cmdInfo)
 
@@ -68,6 +68,6 @@ func (cmd *cmdInfo) Level(level int) bool {
 	return cmd.level == level
 }
 
-func (cmd *cmdInfo) Exec(s *tcp.RegisServer, c *tcp.RegisConn, args []string) base.Reply {
-	return cmd.exec(s, c, args)
+func (cmd *cmdInfo) Exec(c *tcp.RegisConn, args []string) base.Reply {
+	return cmd.exec(c, args)
 }

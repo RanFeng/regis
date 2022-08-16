@@ -26,9 +26,10 @@ var (
 	Client *RegisClient
 )
 
-type replica struct {
-	Replid string
-	Slave  map[int64]*RegisConn // 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
+type replicaForRegisServer struct {
+	Replid  string
+	Replid2 string
+	Slave   map[int64]*RegisConn // 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
 
 	// 用于存储master的client, 如果为nil，表示当前不是slave
 	// 如果与master断开链接，并不能将 Master 置为 nil !!
@@ -41,7 +42,8 @@ type replica struct {
 	// 如果是slave，且master传来了写命令，也要写入缓冲区中并进行计数
 	//	如果一个slave来要求全量同步，发出 fullsync replid masterReplOffset，并发出rdb文件
 	//	表示："我发给你的rdb文件同步进度是 masterReplOffset"
-	MasterReplOffset int64
+	MasterReplOffset  int64
+	MasterReplOffset2 int64
 
 	// 当前节点作为slave时，与master的同步offset
 	// 收到 fullsync ID offset 之后，会收到一个rdb文件，将rdb load到db中之后
@@ -66,7 +68,7 @@ type RegisServer struct {
 	Address    string
 	maxClients int64
 
-	replica
+	replicaForRegisServer
 	safety
 
 	// DB 是服务端的主数据库
@@ -140,7 +142,7 @@ func (s *RegisServer) HeartBeatFromSlave() {
 }
 
 func (s *RegisServer) ReconnectMaster() {
-	cli := MustNewClient(s.Master.Addr, s)
+	cli := MustNewClient(s.Master.Addr)
 	cli.PSync()
 }
 
@@ -231,7 +233,7 @@ func (s *RegisServer) addClient(ctx context.Context, conn net.Conn) {
 		log.Error("semp acquire fail %v", err)
 	}
 	//log.Debug("get semp now is %v", s.Who.Len())
-	c := NewConnection(conn, s)
+	c := NewConnection(conn)
 	s.Lock.Lock()
 	defer s.Lock.Unlock()
 	s.Who[c.ID] = c
@@ -245,7 +247,7 @@ func ListenAndServer(server *RegisServer) error {
 	if err != nil {
 		return err
 	}
-	Client = MustNewClient(Server.Address, Server)
+	Client = MustNewClient(Server.Address)
 	go Server.LoadRDB(conf.Conf.RDBName)
 	for {
 		conn, err := listener.Accept()

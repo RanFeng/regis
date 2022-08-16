@@ -20,12 +20,12 @@ import (
 // - fake client，用于加载rdb
 // - master client，用于与主库交流
 // RegisClient 与 RegisConn 的区别是：
-// RegisClient 是本地任意端口连接其他redis服务器，所以远端主库都在 RegisClient
+// RegisClient 是本地任意端口连接其他redis服务器，所以远端主库都在 RegisClient，还有一种可能是load rdb的fake client
 // RegisConn 是远端任意端口连接本redis服务器，所以远端从库都在 RegisConn
 type RegisClient struct {
-	ID     int64
-	server *RegisServer
-	Conn   net.Conn
+	ID int64
+
+	Conn net.Conn
 
 	Addr     string // remote server Addr
 	LastBeat time.Time
@@ -94,7 +94,7 @@ func (cli *RegisClient) RecvAll() (buf []byte, err error) {
 
 // PartSync 自己是slave，从远端master 增量同步到自己
 func (cli *RegisClient) PartSync() {
-	//selfClient := MustNewClient(cli.server.GetAddr(), cli.server)
+	//selfClient := MustNewClient(Server.GetAddr(), Server)
 	//defer selfClient.Close()
 	r := bufio.NewReader(cli.Conn)
 	for {
@@ -136,24 +136,24 @@ func (cli *RegisClient) FullSync(replid string, offset int64) {
 	}
 
 	// 清掉自己所有的历史数据
-	cli.server.DB.Flush()
-	cli.server.ReplBacklog.Reset(offset)
+	Server.DB.Flush()
+	Server.ReplBacklog.Reset(offset)
 
 	// set false 让load rdb的命令不至于写入到ReplBacklog中
-	cli.server.ReplBacklog.Active = false
+	Server.ReplBacklog.Active = false
 
 	// 同步地load rdb，也就是说这个函数退出时，rdb就已经完全load完毕
-	cli.server.LoadRDB(conf.Conf.RDBName)
+	Server.LoadRDB(conf.Conf.RDBName)
 
-	cli.server.Replid = replid
-	atomic.SwapInt64(&cli.server.MasterReplOffset, offset)
-	atomic.SwapInt64(&cli.server.SlaveReplOffset, offset)
+	Server.Replid = replid
+	atomic.SwapInt64(&Server.MasterReplOffset, offset)
+	atomic.SwapInt64(&Server.SlaveReplOffset, offset)
 
-	for k := range cli.server.Slave {
-		cli.server.CloseConn(k)
+	for k := range Server.Slave {
+		Server.CloseConn(k)
 	}
 	log.Notice("MASTER <-> REPLICA sync: Finished with success")
-	//log.Notice("Synchronization with replica %v succeeded", cli.RemoteAddr())
+	//log.Notice("Synchronization with replicaForServer %v succeeded", cli.RemoteAddr())
 }
 
 // PSync 自己是slave，要拉远端master同步
@@ -171,12 +171,12 @@ func (cli *RegisClient) PSync() {
 	if !redis.Equal(cli.GetReply(), redis.OkReply) {
 		return
 	}
-	//if cli.server.Master == nil {
+	//if Server.Master == nil {
 	//	cli.Send(redis.CmdReply("PSYNC", "?", -1))
 	//} else {
 	log.Notice("Trying a partial resynchronization (request %v:%v).",
-		cli.server.Replid, cli.server.SlaveReplOffset+1)
-	cli.Send(redis.CmdReply("PSYNC", cli.server.Replid, cli.server.SlaveReplOffset+1))
+		Server.Replid, Server.SlaveReplOffset+1)
+	cli.Send(redis.CmdReply("PSYNC", Server.Replid, Server.SlaveReplOffset+1))
 	//}
 	reply := redis.GetString(cli.GetReply())
 	log.Info("get master reply, %v", reply)
@@ -197,30 +197,28 @@ func (cli *RegisClient) PSync() {
 	}
 
 	go cli.PartSync()
-	cli.server.Master = cli
+	Server.Master = cli
 	cli.LastBeat = time.Now()
-	cli.server.ReplBacklog.Active = true
-	log.Info("slave to %v %v %v", cli.server.Replid, cli.RemoteAddr(), cli.server.SlaveReplOffset)
+	Server.ReplBacklog.Active = true
+	log.Info("slave to %v %v %v", Server.Replid, cli.RemoteAddr(), Server.SlaveReplOffset)
 }
 
-func NewClient(addr string, server *RegisServer) (*RegisClient, error) {
+func NewClient(addr string) (*RegisClient, error) {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
 	cli := &RegisClient{
-		ID:     utils.GetConnFd(conn),
-		server: server,
-		Conn:   conn,
-		Addr:   addr,
+		ID:   utils.GetConnFd(conn),
+		Conn: conn,
+		Addr: addr,
 	}
 	return cli, nil
 }
 
-func MustNewClient(addr string, server *RegisServer) *RegisClient {
+func MustNewClient(addr string) *RegisClient {
 	cli := &RegisClient{
-		server: server,
-		Addr:   addr,
+		Addr: addr,
 	}
 	var err error
 	for {

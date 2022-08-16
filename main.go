@@ -59,7 +59,7 @@ func Executor() {
 					return
 				}
 
-				cmd.Reply = cmdInfo.Exec(tcp.Server, cmd.Conn, cmd.Query)
+				cmd.Reply = cmdInfo.Exec(cmd.Conn, cmd.Query)
 
 				log.Info("status %v %v", tcp.Server.ReplBacklog.Active, cmdInfo.HasAttr(base.CmdMaster))
 				// 当自己是master时， ReplBacklog 肯定是active的，当自己是salve时，也要active
