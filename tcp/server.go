@@ -51,6 +51,25 @@ type replicaForRegisServer struct {
 	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
 	SlaveReplOffset int64
 
+	// 表示上一次进行BGSave的时候，本机的 MasterReplOffset 是多少？
+	// 根据slave中有没有 base.SlaveStateWaitBGSaveEnd 状态的slave，
+	// 可以确认当前服务正在BGSave的rdb是否可以用于传给slave全量同步。
+	// 显然，当 LastBGSaveOffset = 0 的时候，有两种情况，
+	// - 第一种：Server 还是单机的时候，自发的BGSave，
+	//   因为单机时，即使在BGSave的过程中发生了新的写入，也不会增加 MasterReplOffset，
+	//   这时候 LastBGSaveOffset 一直都是0。这种情况，不允许使用本次BGSave生成的rdb来给slave全量同步。
+	// - 第二种：Server 接到首个slave时，存下的 MasterReplOffset ，
+	//   因为是首个，所以此时 LastBGSaveOffset 也为0，但是只要找slave中有没有 base.SlaveStateWaitBGSaveEnd 状态的slave，
+	//   如果有，就说明当前的这个BGSave就是他们创建的，那就可以用这个rdb来同步给当前的slave
+	// 上述只使用 base.SlaveStateWaitBGSaveEnd 而不使用 base.SlaveStateWaitBGSaveStart，是为了解决这个边界case：
+	//   如果BGSave的CronJob开始了，然后来了一条写命令，然后来了一个slave A要求同步，这时候slave A只能挂起等待下一次BGSave，
+	//   如果这时候来了个slave B要求同步，发现 LastBGSaveOffset == 0，但是有个slave A在 base.SlaveStateWaitBGSaveStart
+	//   以为刚刚的BGSave是slave A发起的，然后进行同步，这时候就有问题了。
+	//   所以当 LastBGSaveOffset == 0的时候，必须用 base.SlaveStateWaitBGSaveEnd 来判断是否可以用正在BGSave的rdb。
+	//   另外，一旦slave A连接了，master自己就会开始ping slave A，这样 MasterReplOffset 就会自增，
+	//   这样等下一次不管是CronJob BGSave还是slave C进来，都会发现...
+	LastBGSaveOffset int64
+
 	ReplPingSlavePeriod  int // 给slave发心跳包的周期
 	ReplPingMasterPeriod int // 给master发心跳包的周期
 
@@ -98,6 +117,34 @@ func (s *RegisServer) LoadRDB(fn string) {
 	}
 	Client.Send(redis.CmdReply("unlock"))
 	_ = Client.GetReply()
+}
+
+func (s *RegisServer) SaveRDB() error {
+	Server.LastBGSaveOffset = Server.MasterReplOffset
+	return file.SaveRDB(Server.DB.SaveRDB)
+}
+
+func (s *RegisServer) SaveRDBForReplication() {
+	Server.LastBGSaveOffset = Server.MasterReplOffset
+	err := file.SaveRDB(Server.DB.SaveRDB)
+	if err != nil {
+		// TODO bgsave出错，断开所有在 base.SlaveStateWaitBGSaveStart 的slave
+		return
+	}
+}
+
+func SendRDBToSlave() {
+	// BGSave完成，开始传
+	for k := range Server.Slave {
+		slave := Server.Slave[k]
+		if slave.State == base.SlaveStateWaitBGSaveStart {
+			slave.State = base.SlaveStateWaitBGSaveEnd
+			_ = slave.Write(redis.InlineIReply("FULLRESYNC", Server.Replid, Server.LastBGSaveOffset).Bytes())
+			file.SendRDB(conf.Conf.RDBName, slave.Conn)
+			// 为了对增量进行同步，将 slave强行置为-1，重新获取DBIndex
+			slave.DBIndex = -1
+		}
+	}
 }
 
 func (s *RegisServer) SyncSlave(msg []byte) {
@@ -261,7 +308,7 @@ func ListenAndServer(server *RegisServer) error {
 
 func InitServer(prop *conf.RegisConf) *RegisServer {
 	server := &RegisServer{}
-	server.Replid = utils.GetRandomHexChars(40)
+	server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
 	server.Address = fmt.Sprintf("%s:%d", prop.Bind, prop.Port)
 	server.maxClients = prop.MaxClients
 
@@ -279,7 +326,7 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 	server.ReplPingSlavePeriod = 10
 	server.ReplPingMasterPeriod = 3
 
-	server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	//server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
 
 	go server.HeartBeatToSlave()
 	go server.HeartBeatFromSlave()

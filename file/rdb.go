@@ -6,6 +6,7 @@ import (
 	"code/regis/redis"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"time"
 
@@ -137,7 +138,7 @@ func SaveFile(fn string, conn io.Reader, size int) error {
 	return nil
 }
 
-func SendRDB(fn string, conn io.Writer) {
+func SendRDB(fn string, conn net.Conn) {
 	start := time.Now().UnixNano()
 	defer func() {
 		end := time.Now().UnixNano()

@@ -1,9 +1,10 @@
 package command
 
+import "C"
 import (
 	"code/regis/base"
 	"code/regis/conf"
-	"code/regis/file"
+	"code/regis/ds"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
 	"code/regis/redis"
@@ -11,7 +12,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -51,7 +51,7 @@ func Save(conn *tcp.RegisConn, args []string) base.Reply {
 	tcp.Server.DB.SetStatus(base.WorldStopped)
 	defer tcp.Server.DB.SetStatus(base.WorldNormal)
 
-	err := file.SaveRDB(tcp.Server.DB.SaveRDB)
+	err := tcp.Server.SaveRDB()
 
 	if err != nil {
 		return redis.ErrReply("ERR in save")
@@ -65,7 +65,7 @@ func BGSave(conn *tcp.RegisConn, args []string) base.Reply {
 	}
 	tcp.Server.DB.SetStatus(base.WorldFrozen)
 
-	go file.SaveRDB(tcp.Server.DB.SaveRDB) //nolint:errcheck
+	go tcp.Server.SaveRDB() //nolint:errcheck
 
 	return redis.BulkStrReply("Background saving started")
 }
@@ -214,6 +214,7 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 	if args[1] == tcp.Server.Replid &&
 		(args[1] == tcp.Server.Replid2 && offset <= tcp.Server.MasterReplOffset2) &&
 		tcp.Server.ReplBacklog.Active {
+		// 部分同步
 		log.Info("try partial sync %v", offset)
 		bs, err := tcp.Server.ReplBacklog.Read(offset)
 		if err == nil {
@@ -225,40 +226,75 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 		}
 	}
 
+	// 全量同步
 	log.Notice("Full resync requested by replica %v", conn.RemoteAddr())
-	if tcp.Server.DB.GetStatus() != base.WorldNormal {
+	conn.State = base.SlaveStateWaitBGSaveStart
+	tcp.Server.Slave[conn.ID] = conn
+
+	// 如果我们从一个独立的机器变成master，要做一些初始化
+	if len(tcp.Server.Slave) == 1 && tcp.Server.ReplBacklog == nil {
+		// 老id过期了，刷新Replid以及Replid2
+		tcp.Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
+		tcp.Server.Replid2 = strings.Repeat("0", base.ConfigRunIDSize)
+
+		tcp.Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+		tcp.Server.ReplBacklog.Active = true
+		tcp.Server.ReplBacklog.WritePtr = offset // redis这里是+1，但是regis这里直接置为offset
+	}
+
+	if tcp.Server.DB.GetStatus() == base.WorldFrozen {
+		// 1. 正在进行BGSave，如果slave中有已经 base.SlaveStateWaitBGSaveEnd 的，
+		// 说明这次的BGSave是可信的，可以传输给slave，并且本次的BGSave生成的rdb的offset就是 tcp.Server.LastBGSaveOffset
+		for k := range tcp.Server.Slave {
+			if tcp.Server.Slave[k].State == base.SlaveStateWaitBGSaveEnd {
+				// 可信，传！
+				tcp.SendRDBToSlave()
+				return nil
+			}
+		}
+		// TODO 没有可信的rdb，只能等下一次BGSave咯。
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
+
+	// 2. 不在进行BGSave，说明可以自己开始BGSave
 	tcp.Server.DB.SetStatus(base.WorldFrozen)
+	go tcp.Server.SaveRDBForReplication()
 
-	tcp.Server.ReplBacklog.Active = true
-
-	_ = conn.Write(redis.InlineIReply("FULLRESYNC", tcp.Server.Replid, atomic.LoadInt64(&tcp.Server.MasterReplOffset)).Bytes())
-
-	go func() {
-		log.Notice("Starting BGSAVE for SYNC with target: disk")
-		offsetBak := atomic.LoadInt64(&tcp.Server.MasterReplOffset)
-		//conn.State = base.ConnSync
-		//go func() {
-		//	// 防止在传输rdb过程中，长时间不给slave发心跳包，导致slave以为master挂了
-		//	for conn.Status == base.ConnSync {
-		//		err := conn.Write([]byte{'\n'})
-		//		if err != nil {
-		//			return
-		//		}
-		//		time.Sleep(time.Duration(tcp.Server.ReplPingSlavePeriod) * time.Second)
-		//	}
-		//	//log.Info("go routine close safety")
-		//}()
-		_ = file.SaveRDB(tcp.Server.DB.SaveRDB)
-		file.SendRDB(conf.Conf.RDBName, conn.Conn)
-		tcp.Server.Slave[conn.ID] = conn
-		//conn.State = base.ConnNormal
-		// 对增量进行同步
-		if bs, err := tcp.Server.ReplBacklog.Read(offsetBak); err == nil {
-			_, _ = conn.Conn.Write(bs)
-		}
-	}()
+	//go func() {
+	//	log.Notice("Starting BGSAVE for SYNC with target: disk")
+	//	offsetBak := atomic.LoadInt64(&tcp.Server.MasterReplOffset)
+	//	//conn.State = base.ConnSync
+	//	//go func() {
+	//	//	// 防止在传输rdb过程中，长时间不给slave发心跳包，导致slave以为master挂了
+	//	//	for conn.Status == base.ConnSync {
+	//	//		err := conn.Write([]byte{'\n'})
+	//	//		if err != nil {
+	//	//			return
+	//	//		}
+	//	//		time.Sleep(time.Duration(tcp.Server.ReplPingSlavePeriod) * time.Second)
+	//	//	}
+	//	//	//log.Info("go routine close safety")
+	//	//}()
+	//	// TODO 如果报错，解除所有正在等待全量同步的slave，并close掉他们的连接
+	//	_ = tcp.Server.SaveRDB()
+	//
+	//	// 给所有等待rdb的slave都发conn
+	//	// TODO 这里可以多线程发
+	//	for k := range tcp.Server.Slave {
+	//		slave := tcp.Server.Slave[k]
+	//		if slave.State == base.SlaveStateWaitBGSaveStart {
+	//			slave.State = base.SlaveStateWaitBGSaveEnd
+	//			file.SendRDB(conf.Conf.RDBName, slave.Conn)
+	//			// 为了对增量进行同步，将 slave强行置为-1，重新获取DBIndex
+	//			slave.DBIndex = -1
+	//		}
+	//	}
+	//
+	//	// 对增量进行同步
+	//	if bs, err := tcp.Server.ReplBacklog.Read(offsetBak); err == nil {
+	//		_, _ = conn.Conn.Write(bs)
+	//	}
+	//}()
 	return nil
 }
 

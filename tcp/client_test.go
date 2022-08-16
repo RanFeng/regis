@@ -8,7 +8,7 @@ import (
 )
 
 func Test_NewClient(t *testing.T) {
-	cli, err := NewClient(":6379", nil)
+	cli, err := NewClient(":6379")
 	if err != nil {
 		panic(err)
 	}
