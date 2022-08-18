@@ -26,6 +26,7 @@ const (
 	LevelDebug = iota
 	LevelInfo
 	LevelNotice
+	LevelWarn
 	LevelError
 )
 
@@ -55,6 +56,9 @@ func logs(level int, format string, v ...interface{}) {
 	case LevelNotice:
 		prefix := fmt.Sprintf(logPrefix, Cyan, "[N]", fmt.Sprintf("%v:%v", fn, ln))
 		log.Printf("%v %v %v\n", prefix, msg, logSuffix)
+	case LevelWarn:
+		prefix := fmt.Sprintf(logPrefix, Magenta, "[W]", fmt.Sprintf("%v:%v", fn, ln))
+		log.Printf("%v %v %v\n", prefix, msg, logSuffix)
 	case LevelError:
 		prefix := fmt.Sprintf(logPrefix, Red, "[E]", fmt.Sprintf("%v:%v", fn, ln))
 		log.Printf("%v %v %v\n", prefix, msg, logSuffix)
@@ -70,6 +74,9 @@ func Debug(format string, v ...interface{}) {
 
 func Notice(format string, v ...interface{}) {
 	logs(LevelNotice, format, v...)
+}
+func Warn(format string, v ...interface{}) {
+	logs(LevelWarn, format, v...)
 }
 func Error(format string, v ...interface{}) {
 	logs(LevelError, format, v...)

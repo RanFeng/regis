@@ -76,3 +76,20 @@ func TestRestart(t *testing.T) {
 	d.CmdReply(redis.NilReply, "get", "B")
 	d.CmdReply(redis.IntReply(1), "dbsize")
 }
+
+func TestNormal(t *testing.T) {
+	//var i = 10
+	//switch {
+	//case i < 10:
+	//	log.Info("%v", i)
+	//	i = 12
+	//	//fallthrough
+	//case i < 11:
+	//	log.Info("%v", i)
+	//	i = 12
+	//	//fallthrough
+	//case i < 12:
+	//	log.Info("%v", i)
+	//	i = 13
+	//}
+}

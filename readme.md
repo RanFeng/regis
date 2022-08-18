@@ -18,6 +18,7 @@
 - [x] release some key struct dependencies to ds
 - [ ] use time event? or multi goroutine?
 - [ ] 根据redis源码的replication部分重写主从
+- [ ] redis replconfCommand
 
 - [ ] info replication
 - [ ] AOF

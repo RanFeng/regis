@@ -18,7 +18,9 @@ type Command struct {
 
 type replicaForRegisConn struct {
 	// 作为slave的状态
-	State int
+	State base.MySlaveState
+
+	AckOffset int64
 
 	LastBeat time.Time
 }

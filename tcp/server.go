@@ -14,7 +14,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/sync/semaphore"
@@ -26,15 +25,53 @@ var (
 	Client *RegisClient
 )
 
-type replicaForRegisServer struct {
-	Replid  string
-	Replid2 string
-	Slave   map[int64]*RegisConn // 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
+// replicationMaster 这个结构体存放一些master的专有数据
+// 就是当自己作为master的身份时，需要用到哪些数据
+type replicationMaster struct {
+	// 是 RegisServer.Who 的子集用于存储slave的connection, RegisConn.ID -> *RegisConn
+	Slave map[int64]*RegisConn
 
+	// 自己的slave的db下标
+	SlaveDBIndex int
+
+	ReplPingSlavePeriod int64 // 给slave发心跳包的周期
+
+	ReplBacklogLastBeat time.Time
+}
+
+// replicationSlave 这个结构体存放一些slave的专有数据
+// 就是当自己作为slave的身份时，需要用到哪些数据
+type replicationSlave struct {
 	// 用于存储master的client, 如果为nil，表示当前不是slave
 	// 如果与master断开链接，并不能将 Master 置为 nil !!
 	// 除非不想要主从同步了
 	Master *RegisClient
+
+	// 用于存储master的地址
+	MasterAddr string
+
+	// 当前节点作为slave时，与master的同步offset
+	// 收到 fullsync ID offset 之后，会收到一个rdb文件，将rdb load到db中之后
+	// 令 SlaveReplOffset = offset, MasterReplOffset = offset
+	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
+	SlaveReplOffset int64
+
+	// 上一次向master发握手包的时间
+	LastBeatToMaster time.Time
+
+	// 当自己是个slave的时候，自己现在的状态
+	SlaveState base.MeSlaveState
+
+	// 给master发心跳包的周期
+	ReplPingMasterPeriod int
+}
+
+type replication struct {
+	Replid  string
+	Replid2 string
+
+	replicationMaster
+	replicationSlave
 
 	// 当前节点往缓冲区存进去的字节数
 	// 如果不是主从结构，写命令来时不会增加
@@ -44,12 +81,6 @@ type replicaForRegisServer struct {
 	//	表示："我发给你的rdb文件同步进度是 masterReplOffset"
 	MasterReplOffset  int64
 	MasterReplOffset2 int64
-
-	// 当前节点作为slave时，与master的同步offset
-	// 收到 fullsync ID offset 之后，会收到一个rdb文件，将rdb load到db中之后
-	// 令 SlaveReplOffset = offset, MasterReplOffset = offset
-	// 表示 "我收到的rdb文件的同步进度是 slaveReplOffset"
-	SlaveReplOffset int64
 
 	// 表示上一次进行BGSave的时候，本机的 MasterReplOffset 是多少？
 	// 根据slave中有没有 base.SlaveStateWaitBGSaveEnd 状态的slave，
@@ -70,9 +101,6 @@ type replicaForRegisServer struct {
 	//   这样等下一次不管是CronJob BGSave还是slave C进来，都会发现...
 	LastBGSaveOffset int64
 
-	ReplPingSlavePeriod  int // 给slave发心跳包的周期
-	ReplPingMasterPeriod int // 给master发心跳包的周期
-
 	ReplBacklog *ds.RingBuffer
 }
 
@@ -87,13 +115,16 @@ type RegisServer struct {
 	Address    string
 	maxClients int64
 
-	replicaForRegisServer
+	replication
 	safety
 
 	// DB 是服务端的主数据库
 	DB base.DB
 
 	workChan chan *Command // 用于给主协程输送命令的
+
+	// 上一次BGSave的状态
+	//LastBGSaveStatus int
 
 	// PubsubDict 保存所有频道的订阅关系 channel -> RegisConn.ID -> *RegisConn
 	PubsubDict map[string]map[int64]*RegisConn
@@ -108,122 +139,43 @@ func (s *RegisServer) PassExec(c *RegisConn) bool {
 }
 
 func (s *RegisServer) LoadRDB(fn string) {
-	Client.Send(redis.CmdReply("lock"))
-	_ = Client.GetReply()
+	//Client.Send(redis.CmdReply("lock"))
+	//_ = Client.GetReply()
 	query := file.LoadRDB(fn)
 	for i := range query {
 		Client.Send(redis.CmdReply(query[i]...))
 		_ = Client.GetReply()
 	}
-	Client.Send(redis.CmdReply("unlock"))
-	_ = Client.GetReply()
+	//Client.Send(redis.CmdReply("unlock"))
+	//_ = Client.GetReply()
 }
 
-func (s *RegisServer) SaveRDB() error {
-	Server.LastBGSaveOffset = Server.MasterReplOffset
-	return file.SaveRDB(Server.DB.SaveRDB)
-}
-
-func (s *RegisServer) SaveRDBForReplication() {
+func SaveRDB() error {
 	Server.LastBGSaveOffset = Server.MasterReplOffset
 	err := file.SaveRDB(Server.DB.SaveRDB)
 	if err != nil {
+		Server.LastBGSaveOffset = -1
 		// TODO bgsave出错，断开所有在 base.SlaveStateWaitBGSaveStart 的slave
-		return
-	}
-}
-
-func SendRDBToSlave() {
-	// BGSave完成，开始传
-	for k := range Server.Slave {
-		slave := Server.Slave[k]
-		if slave.State == base.SlaveStateWaitBGSaveStart {
-			slave.State = base.SlaveStateWaitBGSaveEnd
-			_ = slave.Write(redis.InlineIReply("FULLRESYNC", Server.Replid, Server.LastBGSaveOffset).Bytes())
-			file.SendRDB(conf.Conf.RDBName, slave.Conn)
-			// 为了对增量进行同步，将 slave强行置为-1，重新获取DBIndex
-			slave.DBIndex = -1
-		}
-	}
-}
-
-func (s *RegisServer) SyncSlave(msg []byte) {
-	atomic.AddInt64(&s.MasterReplOffset, s.ReplBacklog.Write(msg))
-	if len(s.Slave) == 0 {
-		return
-	}
-	log.Info("SyncSlave now %v", Server.MasterReplOffset)
-	for k := range s.Slave {
-		_ = s.Slave[k].Write(msg)
-	}
-}
-
-// HeartBeatToSlave
-// 当自己是master时，用这个来告知slave自己的存活状态。
-// 当自己是slave，同时也是别的机器的master时，就不用告知了
-//   上面的master会发出ping包，我转发那个ping包就行
-func (s *RegisServer) HeartBeatToSlave() {
-	for {
-		if s.Master == nil {
-			s.SyncSlave(redis.CmdReply("ping").Bytes())
-		}
-		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
-	}
-}
-
-// HeartBeatFromSlave
-// 当自己是master时，用这个来监听slave是否存活，
-//   如果超出时间，slave没有朝我发送心跳包时，就当它没了，要关闭。
-// 当自己是slave，同时也是别的机器的master时，也要监听自己的slave的存活状态
-func (s *RegisServer) HeartBeatFromSlave() {
-	for {
-		for key, cli := range s.Slave {
-			if time.Since(cli.LastBeat) > time.Minute {
-				log.Error("MASTER <-> REPLICA sync timeout")
-				delete(s.Slave, key)
-				cli.Close()
+		waits := make([]int64, 0, len(Server.Slave))
+		for s := range Server.Slave {
+			if Server.Slave[s].State == base.SlaveStateWaitBGSaveStart {
+				waits = append(waits, s)
 			}
 		}
-		time.Sleep(time.Duration(s.ReplPingSlavePeriod) * time.Second)
+		Server.CloseConn(waits...)
+		return err
 	}
-}
 
-func (s *RegisServer) ReconnectMaster() {
-	cli := MustNewClient(s.Master.Addr)
-	cli.PSync()
-}
-
-// HeartBeatToMaster
-// 当自己是slave时，定时向master发出心跳包，证明自己存活。
-// 当自己是slave和master时，也要向自己的master发心跳包证明自己存活
-func (s *RegisServer) HeartBeatToMaster() {
-	var ack base.Reply
-	for {
-		if s.Master != nil {
-			//log.Info("ack to master %v %v", s.Replid, s.SlaveReplOffset)
-			ack = redis.CmdReply("REPLCONF", "ACK", s.SlaveReplOffset)
-			err := s.Master.Write(ack.Bytes())
-			if err != nil { // 主从断开了
-				s.ReconnectMaster()
-			}
+	// 完成一次bgsave，对于那些等待rdb同步的slave，传递rdb
+	Server.SlaveDBIndex = -1
+	for s := range Server.Slave {
+		if Server.Slave[s].State == base.SlaveStateWaitBGSaveEnd {
+			_ = Server.Slave[s].Write(redis.InlineIReply("FULLRESYNC", Server.Replid, Server.LastBGSaveOffset).Bytes())
+			file.SendRDB(conf.Conf.RDBName, Server.Slave[s].Conn)
+			Server.Slave[s].State = base.SlaveStateWaitOnline
 		}
-		time.Sleep(time.Duration(s.ReplPingMasterPeriod) * time.Second)
 	}
-}
-
-// HeartBeatFromMaster
-// 当自己是slave时，定时向检查master的存活
-// 当自己是slave和master时，也要定时向检查master的存活
-func (s *RegisServer) HeartBeatFromMaster() {
-	for {
-		if s.Master != nil {
-			if time.Since(s.Master.LastBeat) > time.Minute {
-				log.Notice("master conn lost")
-				s.ReconnectMaster()
-			}
-		}
-		time.Sleep(time.Duration(s.ReplPingMasterPeriod) * time.Second)
-	}
+	return nil
 }
 
 func (s *RegisServer) GetWorkChan() <-chan *Command {
@@ -326,11 +278,7 @@ func InitServer(prop *conf.RegisConf) *RegisServer {
 	server.ReplPingSlavePeriod = 10
 	server.ReplPingMasterPeriod = 3
 
-	//server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
 
-	go server.HeartBeatToSlave()
-	go server.HeartBeatFromSlave()
-	go server.HeartBeatToMaster()
-	go server.HeartBeatFromMaster()
 	return server
 }

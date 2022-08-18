@@ -98,9 +98,9 @@ func (cli *RegisClient) PartSync() {
 	//defer selfClient.Close()
 	r := bufio.NewReader(cli.Conn)
 	for {
-		log.Info("I'm listen master cmd %v", cli.Conn.LocalAddr())
+		log.Debug("I'm listen master cmd %v", cli.Conn.LocalAddr())
 		n, query, err := redis.Parse2Inline(r)
-		log.Info("PartSync ing, %v", query)
+		log.Debug("PartSync ing, %v", query)
 		cli.LastBeat = time.Now()
 		if err != nil {
 			log.Error("PartSync err %v", err)

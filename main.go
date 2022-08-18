@@ -61,12 +61,8 @@ func Executor() {
 
 				cmd.Reply = cmdInfo.Exec(cmd.Conn, cmd.Query)
 
-				log.Info("status %v %v", tcp.Server.ReplBacklog.Active, cmdInfo.HasAttr(base.CmdMaster))
-				// 当自己是master时， ReplBacklog 肯定是active的，当自己是salve时，也要active
-				if tcp.Server.ReplBacklog.Active && cmdInfo.HasAttr(base.CmdMaster) {
-					cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
-					tcp.Server.SyncSlave(cmdBs)
-				}
+				cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
+				tcp.ReplicationFeedSlaves(cmdBs, cmd.Conn.DBIndex)
 			}()
 
 			//time.Sleep(100 * time.Millisecond)
@@ -79,6 +75,15 @@ func Executor() {
 				log.Info("fresh %v", index)
 				tcp.Server.DB.FreshNormal()
 			}
+		case saveMode := <-base.NeedSave:
+			switch saveMode {
+			case base.SaveModeBGSave:
+				if tcp.Server.DB.GetStatus() == base.WorldNormal {
+					go tcp.SaveRDB()
+				}
+			case base.SaveModeSave:
+			}
+
 		}
 
 	}
