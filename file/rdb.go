@@ -65,6 +65,7 @@ func LoadRDB(fn string) (query [][]interface{}) {
 
 func SaveRDB(WriteMDB func(rdb *core.Encoder) error) error {
 	fn := conf.Conf.RDBName
+	log.Debug("save RDB error %v", fn)
 	var err error
 	rdbFile, err := os.Create(fn)
 	if err != nil {

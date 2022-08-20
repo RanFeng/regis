@@ -10,11 +10,25 @@ const (
 type MySlaveState int
 
 const (
-	SlaveStateWaitBGSaveStart MySlaveState = iota // slave正在等待master的bgsave完成
-	SlaveStateWaitBGSaveEnd                       // slave等到了master的bgsave完成
-	SlaveStateWaitSendRDB                         // slave正在接受master的rdb
-	SlaveStateWaitOnline                          // slave正常在线守候同步
+	SlaveStateNeedBGSave    MySlaveState = iota // slave需要开启一个新的BGSave
+	SlaveStateWaitBGSaveEnd                     // slave正在等待master本次的bgsave完成
+	SlaveStateSendingRDB                        // slave正在接受master的rdb
+	SlaveStateOnline                            // slave正常在线守候同步
 )
+
+func (mss MySlaveState) String() string {
+	switch mss {
+	case SlaveStateNeedBGSave:
+		return "SlaveStateNeedBGSave"
+	case SlaveStateWaitBGSaveEnd:
+		return "SlaveStateWaitBGSaveEnd"
+	case SlaveStateSendingRDB:
+		return "SlaveStateSendingRDB"
+	case SlaveStateOnline:
+		return "SlaveStateOnline"
+	}
+	return "unknown"
+}
 
 // slave 中使用的变量
 
@@ -29,9 +43,44 @@ const (
 
 	// 连接阶段结束，握手阶段开始
 	ReplStateReceivePong  // 已经与master建立套接字，且发过了ping，等master回复PONG
+	ReplStateSendPort     // slave发出 replconf listening-port 1234
+	ReplStateReceivePort  // slave等待master回复自己的replconf
+	ReplStateSendCAPA     // slave发出capa
+	ReplStateReceiveCAPA  // slave等待master回复自己的capa
+	ReplStateSendPSync    // slave发出PSync
 	ReplStateReceivePSync // 我发出了PSync，等待master的回复
 
 	// 握手阶段结束，传输阶段开始
 	ReplStateTransfer  // 正在接收master发来的rdb
 	ReplStateConnected // 已经接收完master发来的rdb，完全与master建立主从关系，平时就收收master的增量命令什么的
 )
+
+func (mss MeSlaveState) String() string {
+	switch mss {
+	case ReplStateNone:
+		return "ReplStateNone"
+	case ReplStateConnect:
+		return "ReplStateConnect"
+	case ReplStateConnecting:
+		return "ReplStateConnecting"
+	case ReplStateReceivePong:
+		return "ReplStateReceivePong"
+	case ReplStateSendPort:
+		return "ReplStateSendPort"
+	case ReplStateReceivePort:
+		return "ReplStateReceivePort"
+	case ReplStateSendCAPA:
+		return "ReplStateSendCAPA"
+	case ReplStateReceiveCAPA:
+		return "ReplStateReceiveCAPA"
+	case ReplStateSendPSync:
+		return "ReplStateSendPSync"
+	case ReplStateReceivePSync:
+		return "ReplStateReceivePSync"
+	case ReplStateTransfer:
+		return "ReplStateTransfer"
+	case ReplStateConnected:
+		return "ReplStateConnected"
+	}
+	return "unknown"
+}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"code/regis/base"
 	"code/regis/conf"
+	"code/regis/ds"
 	"code/regis/file"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
@@ -12,7 +13,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -52,7 +52,7 @@ func (cli *RegisClient) Write(msg []byte) error {
 }
 
 func (cli *RegisClient) Close() {
-	log.Info("client close")
+	log.Info("client close %v %v", cli.ID, cli.Addr)
 	_ = cli.Conn.Close()
 }
 
@@ -99,27 +99,27 @@ func (cli *RegisClient) PartSync() {
 	r := bufio.NewReader(cli.Conn)
 	for {
 		log.Debug("I'm listen master cmd %v", cli.Conn.LocalAddr())
-		n, query, err := redis.Parse2Inline(r)
+		_, query, err := redis.Parse2Inline(r)
 		log.Debug("PartSync ing, %v", query)
 		cli.LastBeat = time.Now()
 		if err != nil {
 			log.Error("PartSync err %v", err)
+			cli.Close()
 			return
 		}
-		atomic.AddInt64(&Server.SlaveReplOffset, int64(n))
-		//log.Info("PartSync add MasterReplOffset %v %v", Server.SlaveReplOffset, n)
-		Client.Send(redis.CmdSReply(query...))
+		cmdBytes := redis.CmdSReply(query...)
+		add := Server.ReplBacklog.Write(cmdBytes.Bytes())
+		Server.MasterReplOffset += add
+		Client.Send(cmdBytes)
 		_ = Client.GetReply()
-		//reply := selfClient.GetReply()
-		//log.Debug("master cmd is done %v", utils.BytesViz(reply.Bytes()))
 	}
 }
 
 // FullSync 自己是slave，要拉远端master同步
-func (cli *RegisClient) FullSync(replid string, offset int64) {
+func (cli *RegisClient) FullSync(offset int64) {
+
 	// 接下来master传递一个bulk字符串，用于传输rdb
 	// 先传递一个$509\r\n，其中509表示rdb大小
-	log.Notice("Full resync from master: %v:%v", replid, offset)
 	reader := bufio.NewReader(cli.Conn)
 	msg, err := reader.ReadBytes('\n')
 	log.Info("read msg %v", utils.BytesViz(msg))
@@ -137,71 +137,74 @@ func (cli *RegisClient) FullSync(replid string, offset int64) {
 
 	// 清掉自己所有的历史数据
 	Server.DB.Flush()
-	Server.ReplBacklog.Reset(offset)
+	if Server.ReplBacklog != nil {
+		Server.ReplBacklog.Reset(offset)
 
-	// set false 让load rdb的命令不至于写入到ReplBacklog中
-	Server.ReplBacklog.Active = false
+		// set false 让load rdb的命令不至于写入到ReplBacklog中
+		Server.ReplBacklog.Active = false
+	}
 
 	// 同步地load rdb，也就是说这个函数退出时，rdb就已经完全load完毕
 	Server.LoadRDB(conf.Conf.RDBName)
 
-	Server.Replid = replid
-	atomic.SwapInt64(&Server.MasterReplOffset, offset)
-	atomic.SwapInt64(&Server.SlaveReplOffset, offset)
-
-	for k := range Server.Slave {
-		Server.CloseConn(k)
-	}
 	log.Notice("MASTER <-> REPLICA sync: Finished with success")
-	//log.Notice("Synchronization with replicaForServer %v succeeded", cli.RemoteAddr())
+	if Server.ReplBacklog == nil {
+		Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+	}
+	if !Server.ReplBacklog.Active {
+		Server.ReplBacklog.Active = true
+	}
+	Server.Replid2 = strings.Repeat("0", base.ConfigRunIDSize)
+	Server.SlaveState = base.ReplStateConnected
+	cli.PartSync()
 }
 
 // PSync 自己是slave，要拉远端master同步
-func (cli *RegisClient) PSync() {
-	log.Notice("MASTER <-> REPLICA sync started")
-	cli.Send(redis.CmdReply("ping")) // TODO 此处发出的ping会被master认为是master的master发来的
-	if !redis.Equal(cli.GetReply(), redis.StrReply("PONG")) {
-		return
-	}
-	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
-	if !redis.Equal(cli.GetReply(), redis.OkReply) {
-		return
-	}
-	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
-	if !redis.Equal(cli.GetReply(), redis.OkReply) {
-		return
-	}
-	//if Server.Master == nil {
-	//	cli.Send(redis.CmdReply("PSYNC", "?", -1))
-	//} else {
-	log.Notice("Trying a partial resynchronization (request %v:%v).",
-		Server.Replid, Server.SlaveReplOffset+1)
-	cli.Send(redis.CmdReply("PSYNC", Server.Replid, Server.SlaveReplOffset+1))
-	//}
-	reply := redis.GetString(cli.GetReply())
-	log.Info("get master reply, %v", reply)
-	syncInfo := strings.Split(reply, " ")
-	if len(syncInfo) == 3 { // 是 full sync
-		tag := strings.ToUpper(syncInfo[0])
-		switch tag {
-		case "FULLRESYNC":
-			offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
-			if err != nil {
-				log.Error("get syncInfo offset fail, err %v", syncInfo)
-			}
-			if offset < 0 {
-				offset = 0
-			}
-			cli.FullSync(syncInfo[1], offset)
-		}
-	}
-
-	go cli.PartSync()
-	Server.Master = cli
-	cli.LastBeat = time.Now()
-	Server.ReplBacklog.Active = true
-	log.Info("slave to %v %v %v", Server.Replid, cli.RemoteAddr(), Server.SlaveReplOffset)
-}
+//func (cli *RegisClient) PSync() {
+//	//log.Notice("MASTER <-> REPLICA sync started")
+//	//cli.Send(redis.CmdReply("ping")) // TODO 此处发出的ping会被master认为是master的master发来的
+//	//if !redis.Equal(cli.GetReply(), redis.StrReply("PONG")) {
+//	//	return
+//	//}
+//	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
+//	if !redis.Equal(cli.GetReply(), redis.OkReply) {
+//		return
+//	}
+//	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
+//	if !redis.Equal(cli.GetReply(), redis.OkReply) {
+//		return
+//	}
+//	//if Server.Master == nil {
+//	//	cli.Send(redis.CmdReply("PSYNC", "?", -1))
+//	//} else {
+//	log.Notice("Trying a partial resynchronization (request %v:%v).",
+//		Server.Replid, Server.MasterReplOffset+1)
+//	cli.Send(redis.CmdReply("PSYNC", Server.Replid, Server.MasterReplOffset+1))
+//	//}
+//	reply := redis.GetString(cli.GetReply())
+//	log.Info("get master reply, %v", reply)
+//	syncInfo := strings.Split(reply, " ")
+//	if len(syncInfo) == 3 { // 是 full sync
+//		tag := strings.ToUpper(syncInfo[0])
+//		switch tag {
+//		case "FULLRESYNC":
+//			offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
+//			if err != nil {
+//				log.Error("get syncInfo offset fail, err %v", syncInfo)
+//			}
+//			if offset < 0 {
+//				offset = 0
+//			}
+//			cli.FullSync(syncInfo[1], offset)
+//		}
+//	}
+//
+//	go cli.PartSync()
+//	Server.Master = cli
+//	cli.LastBeat = time.Now()
+//	Server.ReplBacklog.Active = true
+//	log.Info("slave to %v %v %v", Server.Replid, cli.RemoteAddr(), Server.MasterReplOffset)
+//}
 
 func NewClient(addr string) (*RegisClient, error) {
 	conn, err := net.Dial("tcp", addr)

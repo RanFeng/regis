@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"code/regis/base"
 	log "code/regis/lib"
+	"code/regis/lib/utils"
 	"errors"
 	"io"
 	"strconv"
@@ -38,11 +39,11 @@ func Parse2Inline(r *bufio.Reader) (int, []string, error) {
 		case PrefixArray[0]:
 			argsNum, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 			if err != nil {
-				log.Fatal("array parse err")
+				log.Error("array parse err")
 				return lens, nil, err
 			}
 			if argsNum <= 0 {
-				log.Fatal("array length is zero")
+				log.Error("array length is zero")
 				return lens, nil, errors.New("array length is zero")
 			}
 			query := make([]string, argsNum)
@@ -58,19 +59,19 @@ func Parse2Inline(r *bufio.Reader) (int, []string, error) {
 		case PrefixBulk[0]:
 			bulkLen, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 			if err != nil {
-				log.Fatal("bulk parse err")
+				log.Error("bulk parse err")
 				return lens, nil, err
 			}
 			if bulkLen <= 0 {
-				log.Fatal("bulk length is zero")
-				return lens, nil, errors.New("bulk length is zero")
+				log.Error("bulk is null %v", utils.BytesViz(msg))
+				continue
 			}
 			//log.Debug("bulk len %v", bulkLen)
 			buf := make([]byte, bulkLen)
 			n, err := io.ReadFull(r, buf)
 			lens += n
 			if err != nil {
-				log.Fatal("bulk read err")
+				log.Error("bulk read err")
 				return lens, nil, err
 			}
 			//log.Debug("bulk val %v", string(buf))
@@ -78,11 +79,11 @@ func Parse2Inline(r *bufio.Reader) (int, []string, error) {
 			n, err = io.ReadFull(r, end)
 			lens += n
 			if err != nil {
-				log.Fatal("CRLF read err")
+				log.Error("CRLF read err")
 				return lens, nil, err
 			}
 			if string(end) != CRLF {
-				log.Fatal("bulk end is invalid %v", end)
+				log.Error("bulk end is invalid %v", end)
 				return lens, nil, errors.New("bulk end is invalid")
 			}
 			return lens, []string{string(buf)}, nil
@@ -132,11 +133,11 @@ func Parse2Reply(conn io.Reader) base.Reply {
 	case PrefixArray[0]:
 		argsNum, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 		if err != nil {
-			log.Fatal("array parse err")
+			log.Error("array parse err")
 			return NilReply
 		}
 		if argsNum <= 0 {
-			log.Fatal("array length is zero")
+			log.Error("array length is zero")
 			return NilReply
 		}
 		query := make([]base.Reply, argsNum)
@@ -147,27 +148,27 @@ func Parse2Reply(conn io.Reader) base.Reply {
 	case PrefixBulk[0]:
 		bulkLen, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 		if err != nil {
-			log.Fatal("bulk parse err")
+			log.Error("bulk parse err")
 			return NilReply
 		}
 		if bulkLen <= 0 {
-			log.Fatal("bulk length is zero")
+			log.Error("bulk is null %v", utils.BytesViz(msg))
 			return NilReply
 		}
 		buf := make([]byte, bulkLen)
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
-			log.Fatal("bulk read err")
+			log.Error("bulk read err")
 			return NilReply
 		}
 		end := make([]byte, len(CRLF))
 		_, err = io.ReadFull(r, end)
 		if err != nil {
-			log.Fatal("CRLF read err")
+			log.Error("CRLF read err")
 			return NilReply
 		}
 		if string(end) != CRLF {
-			log.Fatal("bulk end is invalid %v", end)
+			log.Error("bulk end is invalid %v", end)
 			return NilReply
 		}
 		return StrReply(string(buf))
@@ -178,7 +179,7 @@ func Parse2Reply(conn io.Reader) base.Reply {
 	case PrefixInt[0]:
 		v, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 		if err != nil {
-			log.Fatal("ParseInt err")
+			log.Error("ParseInt err")
 			return NilReply
 		}
 		return IntReply(int(v))

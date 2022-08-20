@@ -47,7 +47,7 @@ func parse(src io.Reader) *RegisConf {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		log.Fatal("fail load cfg %v", err)
+		log.Error("fail load cfg %v", err)
 	}
 
 	// parse format

@@ -2,9 +2,13 @@ package tcp
 
 import (
 	"code/regis/base"
+	"code/regis/conf"
+	"code/regis/ds"
 	log "code/regis/lib"
 	"code/regis/lib/utils"
 	"code/regis/redis"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,17 +26,18 @@ var (
 
 // ReplicationFeedSlaves
 // 当自己是最上层的master时，用户执行写入命令时，往下游slave写
-// 当自己不是最上层的master，但是自己下面有slave的时候，用 ReplicationFeedSlavesFromMasterStream 函数
+// 当自己不是最上层的master，但是自己下面有slave的时候，对于 base.CmdPropagate 属性的命令，需要往下游传
 func ReplicationFeedSlaves(msg []byte, dbIndex int) {
 
 	// 如果自己不是最上层的master，不做命令传播
-	if Server.Master == nil || (Server.ReplBacklog == nil || !Server.ReplBacklog.Active || len(Server.Slave) == 0) {
+	if Server.Master != nil || Server.ReplBacklog == nil || !Server.ReplBacklog.Active {
 		return
 	}
 
 	// 如果写命令的db改了，要使用select改一下
 	selectCMD := []byte{}
 	if Server.SlaveDBIndex != dbIndex {
+		log.Warn("change db %v %v", Server.SlaveDBIndex, dbIndex)
 		selectCMD = redis.CmdReply("SELECT", dbIndex).Bytes()
 		Server.SlaveDBIndex = dbIndex
 	}
@@ -50,50 +55,31 @@ func ReplicationFeedSlaves(msg []byte, dbIndex int) {
 	Server.MasterReplOffset += appendNum
 
 	// 再往slave同步
-	for k := range Server.Slave {
-		// 对于在等待rdb的那部分slave，现在不同步
-		if Server.Slave[k].State == base.SlaveStateWaitBGSaveStart {
-			continue
-		}
-
-		if len(selectCMD) > 0 {
-			_ = Server.Slave[k].Write(selectCMD)
-		}
-		_ = Server.Slave[k].Write(msg)
-	}
+	//for k := range Server.Slave {
+	//	// 对于在等待rdb的那部分slave，现在不同步
+	//	if Server.Slave[k].State != base.SlaveStateOnline {
+	//		continue
+	//	}
+	//
+	//	if len(selectCMD) > 0 {
+	//		_ = Server.Slave[k].Write(selectCMD)
+	//	}
+	//	_ = Server.Slave[k].Write(msg)
+	//}
 }
 
 // ReplicationFeedSlavesFromMasterStream
 // 当自己是slave的时候，下面还有slave，那就直接转发来自master的命令
-func ReplicationFeedSlavesFromMasterStream(msg []byte) {
-	// 记录到自己的back log中，并改变偏移量
-	if Server.ReplBacklog != nil && Server.ReplBacklog.Active {
-		Server.MasterReplOffset += Server.ReplBacklog.Write(msg)
-	}
-
+func ReplicationFeedSlavesFromMasterStream() {
 	for k := range Server.Slave {
 		// 对于在等待rdb的那部分slave，现在不同步
-		if Server.Slave[k].State == base.SlaveStateWaitBGSaveStart {
+		if Server.Slave[k].State != base.SlaveStateOnline {
 			continue
 		}
-		_ = Server.Slave[k].Write(msg)
-	}
-}
-
-// HeartBeatFromSlave
-// 当自己是master时，用这个来监听slave是否存活，
-//   如果超出时间，slave没有朝我发送心跳包时，就当它没了，要关闭。
-// 当自己是slave，同时也是别的机器的master时，也要监听自己的slave的存活状态
-func HeartBeatFromSlave() {
-	for {
-		for key, cli := range Server.Slave {
-			if time.Since(cli.LastBeat) > time.Minute {
-				log.Error("MASTER <-> REPLICA sync timeout")
-				delete(Server.Slave, key)
-				cli.Close()
-			}
+		slaveOffset := Server.Slave[k].AckOffset
+		if buf, err := Server.ReplBacklog.Read(slaveOffset); err == nil {
+			_ = Server.Slave[k].Write(buf)
 		}
-		time.Sleep(time.Duration(Server.ReplPingSlavePeriod) * time.Second)
 	}
 }
 
@@ -113,7 +99,7 @@ func UnsetMaster() {
 
 	// 切换自己的offset和replid
 	Server.MasterReplOffset2 = Server.MasterReplOffset
-	Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
+	//Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
 
 	// 断开所有的slave，让他们重新获取新的replid
 	freeAllSlaves()
@@ -121,6 +107,90 @@ func UnsetMaster() {
 	Server.SlaveDBIndex = -1
 	Server.ReplBacklogLastBeat = time.Now()
 	Server.SlaveState = base.ReplStateNone
+}
+
+func syncWithMaster() {
+	if Server.SlaveState == base.ReplStateNone {
+		Server.Master.Close()
+		return
+	}
+
+	if Server.SlaveState == base.ReplStateConnecting {
+		Server.Master.Send(redis.CmdReply("PING"))
+		Server.SlaveState = base.ReplStateReceivePong
+	}
+
+	if Server.SlaveState == base.ReplStateReceivePong {
+		_ = redis.GetInline(Server.Master.GetReply())
+		Server.SlaveState = base.ReplStateSendPort
+	}
+
+	if Server.SlaveState == base.ReplStateSendPort {
+		Server.Master.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
+		Server.SlaveState = base.ReplStateReceivePort
+	}
+
+	if Server.SlaveState == base.ReplStateReceivePort {
+		_ = redis.GetInline(Server.Master.GetReply())
+		Server.SlaveState = base.ReplStateSendCAPA
+	}
+
+	if Server.SlaveState == base.ReplStateSendCAPA {
+		Server.Master.Send(redis.CmdReply("REPLCONF", "capa", "eof", "capa", "psync2"))
+		Server.SlaveState = base.ReplStateReceiveCAPA
+	}
+
+	if Server.SlaveState == base.ReplStateReceiveCAPA {
+		_ = redis.GetInline(Server.Master.GetReply())
+		Server.SlaveState = base.ReplStateSendPSync
+	}
+
+	if Server.SlaveState == base.ReplStateSendPSync {
+		log.Info("slave psync to master, %v %v", Server.Replid, Server.MasterReplOffset+1)
+		Server.Master.Send(redis.CmdReply("PSYNC", Server.Replid, Server.MasterReplOffset+1))
+		//Server.Master.Send(redis.CmdReply("PSYNC", "?", "-1"))
+		Server.SlaveState = base.ReplStateReceivePSync
+	}
+
+	// 会收到是continue还是fullresync
+	if Server.SlaveState == base.ReplStateReceivePSync {
+		reply := redis.GetInline(Server.Master.GetReply())
+		switch strings.ToUpper(reply[0]) {
+		case "FULLRESYNC":
+			if len(reply) != 3 {
+				log.Warn("Master replied with wrong +FULLRESYNC syntax.")
+				Server.Replid = strings.Repeat("0", base.ConfigRunIDSize)
+			} else {
+				offset, err := strconv.ParseInt(reply[2], 10, 64)
+				if err != nil {
+					log.Warn("Master replied with wrong +FULLRESYNC syntax.")
+					Server.Replid = strings.Repeat("0", base.ConfigRunIDSize)
+				}
+				Server.Replid = reply[1]
+				Server.MasterReplOffset = offset
+				log.Notice("Full resync from master: %v:%v", Server.Replid, Server.MasterReplOffset)
+			}
+			Server.SlaveState = base.ReplStateTransfer
+			go Server.Master.FullSync(Server.MasterReplOffset)
+		case "CONTINUE":
+			log.Notice("Successful partial resynchronization with master.")
+			if len(reply) == 2 && Server.Replid != reply[1] {
+				log.Warn("Master replication ID changed to %v", reply[1])
+				Server.Replid2 = Server.Replid
+				Server.MasterReplOffset2 = Server.MasterReplOffset
+				freeAllSlaves()
+			}
+			if Server.ReplBacklog == nil {
+				Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+			}
+			if !Server.ReplBacklog.Active {
+				Server.ReplBacklog.Active = true
+			}
+			log.Notice("MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.")
+			Server.SlaveState = base.ReplStateConnected
+			go Server.Master.PartSync()
+		}
+	}
 }
 
 func freeAllSlaves() {
@@ -135,7 +205,7 @@ func freeAllSlaves() {
 // 如果与master的连接出现问题，终止与master的交流，准备重连
 func CancelSlaveHeartBeat() int {
 	switch Server.SlaveState {
-	case base.ReplStateConnecting, base.ReplStateTransfer:
+	case base.ReplStateConnecting, base.ReplStateTransfer, base.ReplStateConnected:
 		Server.Master.Close()
 		Server.SlaveState = base.ReplStateConnect
 	default:
@@ -150,10 +220,12 @@ func CancelSlaveHeartBeat() int {
 // 当自己是slave和master时，也要向自己的master发心跳包证明自己存活
 func HeartBeatToMaster() {
 	if Server.Master != nil {
-		ack := redis.CmdReply("REPLCONF", "ACK", Server.SlaveReplOffset)
+		//log.Debug("send ack to master")
+		ack := redis.CmdReply("REPLCONF", "ACK", Server.MasterReplOffset)
+		//ack := redis.CmdReply("REPLCONF", "ACK", 0)
 		err := Server.Master.Write(ack.Bytes())
 		if err != nil { // 主从断开了
-			//CancelSlaveHeartBeat()
+			CancelSlaveHeartBeat()
 			return
 		}
 		Server.LastBeatToMaster = time.Now()
@@ -179,6 +251,7 @@ func ReplicationCron() {
 	// master
 
 	// 作为master，定期向slave发送ping包
+	//log.Debug("hhhhhh %v %v", replicationCronLoops, Server.ReplPingSlavePeriod)
 	if replicationCronLoops%Server.ReplPingSlavePeriod == 0 {
 		HeartBeatToSlave()
 	}
@@ -188,14 +261,19 @@ func ReplicationCron() {
 	// 顺便检查是否有在等待BGSave的slave
 	var maxWait time.Duration = 0
 	for k := range Server.Slave {
+		//log.Debug("Server slave  %v %v", Server.Slave[k].RemoteAddr(), Server.Slave[k].State)
 		switch Server.Slave[k].State {
-		case base.SlaveStateWaitBGSaveStart:
+		case base.SlaveStateNeedBGSave:
 			wait := time.Since(Server.Slave[k].LastBeat)
 			maxWait = utils.IF(maxWait > wait, maxWait, wait).(time.Duration)
 			_ = Server.Slave[k].Write([]byte{'\n'})
 		case base.SlaveStateWaitBGSaveEnd:
+			if time.Since(Server.Slave[k].LastBeat) > time.Minute {
+				log.Warn("Disconnecting timedout replica (streaming sync): %s", Server.Slave[k].RemoteAddr())
+				Server.CloseConn(k)
+			}
 			_ = Server.Slave[k].Write([]byte{'\n'})
-		case base.SlaveStateWaitOnline:
+		case base.SlaveStateOnline:
 			if time.Since(Server.Slave[k].LastBeat) > time.Minute {
 				log.Warn("Disconnecting timedout replica (streaming sync): %s", Server.Slave[k].RemoteAddr())
 				Server.CloseConn(k)
@@ -208,9 +286,12 @@ func ReplicationCron() {
 		base.NeedSave <- 0
 	}
 
+	// 作为master且作为slave，定期向slave同步增量信息
+	//ReplicationFeedSlavesFromMasterStream()
+
 	// 如果一个master长时间没有任何一个slave，但是却一直开着Backlog，这不合适
 	// 那么我们就切换成普通的，非主从的机器
-	if len(Server.Slave) == 0 && time.Since(Server.ReplBacklogLastBeat) > time.Hour {
+	if Server.Master == nil && Server.ReplBacklog != nil && len(Server.Slave) == 0 && time.Since(Server.ReplBacklogLastBeat) > time.Hour {
 		Server.ReplBacklog = nil
 
 		// 切换自己的offset和replid
@@ -225,6 +306,7 @@ func ReplicationCron() {
 	// 如果我们是slave，就准备与master进行同步
 
 	// 监听master的心跳，判断master是否心跳超时了
+	//log.Debug("now me state: %v", Server.SlaveState)
 	if masterTimeout() && Server.SlaveState >= base.ReplStateConnecting && Server.SlaveState <= base.ReplStateTransfer {
 		switch Server.SlaveState {
 		case base.ReplStateTransfer:
@@ -250,12 +332,13 @@ func ReplicationCron() {
 		cli, err := NewClient(Server.MasterAddr)
 		if err != nil {
 			log.Notice("Unable to connect to MASTER: %s", Server.MasterAddr)
-			return
+		} else {
+			Server.Master = cli
+			log.Notice("MASTER <-> REPLICA sync started")
+			Server.Master.LastBeat = time.Now()
+			Server.SlaveState = base.ReplStateConnecting
+			syncWithMaster()
 		}
-		Server.Master = cli
-		log.Notice("MASTER <-> REPLICA sync started")
-		Server.Master.LastBeat = time.Now()
-		Server.SlaveState = base.ReplStateConnecting
 	}
 
 	// 定期向master发送ack

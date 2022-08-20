@@ -73,7 +73,7 @@ func (rb *RingBuffer) Readable(rptr int64) error {
 	if rb.WritePtr <= rptr {
 		return fmt.Errorf("rptr is not less than WritePtr, %v <= %v", rb.WritePtr, rptr)
 	}
-	if rb.WritePtr-rptr >= rb.HistLen {
+	if rb.WritePtr-rptr > rb.HistLen {
 		return fmt.Errorf("data loss rptr = %v, sptr = %v, wptr = %v, size = %v",
 			rptr, rb.StartPtr, rb.WritePtr, rb.HistLen)
 	}

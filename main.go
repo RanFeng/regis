@@ -10,6 +10,20 @@ import (
 	"time"
 )
 
+var tick = time.NewTimer(time.Second)
+
+func TimeTicker() {
+	for {
+		select {
+		case <-tick.C:
+			//log.Debug("tick one second!")
+			tcp.ReplicationCron()
+			tick.Reset(time.Second)
+
+		}
+	}
+}
+
 func Executor() {
 	for {
 		if tcp.Server.DB.GetStatus() == base.WorldStopped {
@@ -61,8 +75,11 @@ func Executor() {
 
 				cmd.Reply = cmdInfo.Exec(cmd.Conn, cmd.Query)
 
-				cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
-				tcp.ReplicationFeedSlaves(cmdBs, cmd.Conn.DBIndex)
+				if cmdInfo.HasAttr(base.CmdPropagate) {
+					//tcp.ReplicationFeedSlavesFromMasterStream()
+					cmdBs := redis.CmdSReply(cmd.Query...).Bytes()
+					tcp.ReplicationFeedSlaves(cmdBs, cmd.Conn.DBIndex)
+				}
 			}()
 
 			//time.Sleep(100 * time.Millisecond)
@@ -78,12 +95,13 @@ func Executor() {
 		case saveMode := <-base.NeedSave:
 			switch saveMode {
 			case base.SaveModeBGSave:
+				log.Debug("start BGSave %v", tcp.Server.DB.GetStatus())
 				if tcp.Server.DB.GetStatus() == base.WorldNormal {
+					tcp.Server.DB.SetStatus(base.WorldFrozen)
 					go tcp.SaveRDB()
 				}
 			case base.SaveModeSave:
 			}
-
 		}
 
 	}
@@ -97,11 +115,12 @@ func main() {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Fatal("ListenAndServer failed %v\n", r)
+				log.Error("ListenAndServer failed %v\n", r)
 			}
 		}()
 		_ = tcp.ListenAndServer(tcp.Server)
 	}()
 
+	go TimeTicker()
 	Executor()
 }

@@ -62,9 +62,9 @@ func BGSave(conn *tcp.RegisConn, args []string) base.Reply {
 	if tcp.Server.DB.GetStatus() != base.WorldNormal {
 		return redis.ErrReply("ERR can not save in bgsave")
 	}
-	tcp.Server.DB.SetStatus(base.WorldFrozen)
+	//tcp.Server.DB.SetStatus(base.WorldFrozen)
 
-	base.NeedSave <- 0
+	go func() { base.NeedSave <- 0 }()
 
 	return redis.BulkStrReply("Background saving started")
 }
@@ -131,15 +131,17 @@ func UnSubscribe(conn *tcp.RegisConn, args []string) base.Reply {
 
 // ReplicaOf 自己是slave，向master要同步
 func ReplicaOf(conn *tcp.RegisConn, args []string) base.Reply {
-	if args[1] == "no" && args[2] == "one" {
+	if strings.ToLower(args[1]) == "no" && strings.ToLower(args[2]) == "one" {
 		tcp.UnsetMaster()
 		return redis.OkReply
 	}
 
 	if strings.ToLower(args[1]) == "getack" {
 		tcp.HeartBeatToMaster()
+		return nil
 	}
 
+	// replicaof IP port
 	_, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		return redis.ErrReply("ERR value is not an integer or out of range")
@@ -207,11 +209,18 @@ func ReplConf(conn *tcp.RegisConn, args []string) base.Reply {
 		}
 		conn.AckOffset = utils.IF(conn.AckOffset > offset, conn.AckOffset, offset).(int64)
 		conn.LastBeat = time.Now()
-		//switch conn.State {
-		//case base.SlaveStateWaitBGSaveEnd:
-		//
-		//}
-
+		tcp.Server.ReplBacklogLastBeat = time.Now()
+		//log.Info("conn state %v", conn.State)
+		switch conn.State {
+		case base.SlaveStateOnline:
+			// 再发出从BGSave开始到现在的所有增量命令
+			//bs, err := tcp.Server.ReplBacklog.Read(conn.AckOffset)
+			//log.Debug("read back_log %v %v", utils.BytesViz(bs), err)
+			if bs, err := tcp.Server.ReplBacklog.Read(conn.AckOffset); err == nil {
+				_ = conn.Write(bs)
+				conn.AckOffset = tcp.Server.MasterReplOffset
+			}
+		}
 		return nil
 	}
 	return redis.OkReply
@@ -221,7 +230,7 @@ func ReplConf(conn *tcp.RegisConn, args []string) base.Reply {
 func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
-		// 说明传过来是个 PSYNC ? -1 ，直接全量同步
+		// 此处不应该出错，试试直接全量同步
 		goto fullSync
 	}
 
@@ -239,9 +248,8 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 
 	// 好了，至此应该可以开始部分同步了
 	conn.LastBeat = time.Now()
-	conn.State = base.SlaveStateWaitOnline
+	conn.State = base.SlaveStateOnline
 	tcp.Server.Slave[conn.ID] = conn
-	offset -= 1
 
 	// 回复失败，直接退出。
 	err = conn.Write(redis.InlineSReply("CONTINUE", tcp.Server.Replid).Bytes())
@@ -252,8 +260,8 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 	// 开始真正的部分同步
 	if tcp.Server.ReplBacklog.Active {
 		// 部分同步
-		log.Info("try partial sync %v", offset)
-		bs, _ := tcp.Server.ReplBacklog.Read(offset)
+		log.Info("try partial sync %v", offset-1)
+		bs, _ := tcp.Server.ReplBacklog.Read(offset - 1)
 		log.Info("I'm sending %v !!", utils.BytesViz(bs))
 		_ = conn.Write(bs)
 	}
@@ -261,33 +269,34 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 
 fullSync:
 	// 全量同步
-	log.Notice("Full resync requested by replica %v", conn.RemoteAddr())
+	log.Notice("Full resync requested by replica %v %v", conn.RemoteAddr(), offset)
 	conn.LastBeat = time.Now()
-	conn.State = base.SlaveStateWaitBGSaveStart
+	conn.State = base.SlaveStateNeedBGSave
 	tcp.Server.Slave[conn.ID] = conn
 
 	// 如果我们从一个独立的机器变成master，要做一些初始化
-	if len(tcp.Server.Slave) == 1 && tcp.Server.ReplBacklog == nil {
+	if len(tcp.Server.Slave) == 1 {
 		// 老id过期了，刷新Replid以及Replid2
 		tcp.Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
 		tcp.Server.Replid2 = strings.Repeat("0", base.ConfigRunIDSize)
 
 		tcp.Server.MasterReplOffset2 = -1
 
-		// TODO 这里要保证 ReplBacklog 一定是nil，但是现在还不能保证
-		tcp.Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
-		tcp.Server.ReplBacklog.Active = true
-		tcp.Server.ReplBacklog.WritePtr = offset // redis这里是+1，但是regis这里直接置为offset
+		if tcp.Server.ReplBacklog == nil {
+			tcp.Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+			tcp.Server.ReplBacklog.Active = true
+			tcp.Server.ReplBacklog.WritePtr = offset - 1 // redis这里是+1，regis这里直接置为offset - 1
+		}
 	}
 
 	if tcp.Server.DB.GetStatus() == base.WorldFrozen && tcp.Server.LastBGSaveOffset >= 0 {
-		// 1. 正在进行BGSave，如果slave中有已经 base.SlaveStateWaitBGSaveEnd 的，
+		// 1. 正在进行BGSave，如果slave中有已经 base.SlaveStateWaitBGSaveEnd 或以上 的，
 		// 说明这次的BGSave是可信的，可以传输给slave，并且本次的BGSave生成的rdb的offset就是 tcp.Server.LastBGSaveOffset
 		for k := range tcp.Server.Slave {
-			if tcp.Server.Slave[k].State == base.SlaveStateWaitBGSaveEnd {
+			if tcp.Server.Slave[k].State >= base.SlaveStateWaitBGSaveEnd {
 				// 可信，传！
 				conn.State = base.SlaveStateWaitBGSaveEnd
-				//tcp.Server.SlaveDBIndex = -1
+				tcp.Server.SlaveDBIndex = -1
 				//_ = conn.Write(redis.InlineIReply("FULLRESYNC", tcp.Server.Replid, tcp.Server.LastBGSaveOffset).Bytes())
 				return nil
 			}
@@ -295,11 +304,17 @@ fullSync:
 		// TODO 没有可信的rdb，只能等下一次BGSave咯。
 		log.Notice("Can't attach the replica to the current BGSAVE. Waiting for next BGSAVE for SYNC")
 	} else {
-		// 2. TODO 不在进行BGSave，说明可以自己开始BGSave
-		tcp.Server.DB.SetStatus(base.WorldFrozen)
+		// 2. 不在进行BGSave，说明可以自己开始BGSave
+		//log.Debug("start new BgSave")
+		//tcp.Server.DB.SetStatus(base.WorldFrozen)
 		//_ = conn.Write(redis.InlineIReply("FULLRESYNC", tcp.Server.Replid, tcp.Server.LastBGSaveOffset).Bytes())
-		base.NeedSave <- 0
+		go func() {
+			base.NeedSave <- 0
+			conn.State = base.SlaveStateWaitBGSaveEnd
+			tcp.Server.SlaveDBIndex = -1
+		}()
 	}
+
 	return nil
 }
 
