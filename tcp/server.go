@@ -102,6 +102,10 @@ type replication struct {
 	ReplBacklog *ds.RingBuffer
 }
 
+type sentinel struct {
+	SentinelMode bool
+}
+
 type safety struct {
 	Lock       sync.Mutex // 对 RegisServer.Who, RegisServer.Slave 操作的锁
 	Monopolist string
@@ -114,6 +118,7 @@ type RegisServer struct {
 	maxClients int64
 
 	replication
+	sentinel
 	safety
 
 	// DB 是服务端的主数据库
