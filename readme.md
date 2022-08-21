@@ -9,20 +9,14 @@
 - [x] ring buffer (so easy)
 - [x] redis offset, part, full sync
 - [x] boot from conf and shell flags
-- [ ] cascade master-slave doing ....
-- [ ] slaveof, PSYNC
-- [ ] master-slave reconnection
+- [x] cascade master-slave
+- [x] slaveof, PSYNC
+- [x] master-slave reconnection
 - [ ] set, zset, hash command
 
-
-- [x] release some key struct dependencies to ds
-- [ ] use time event? or multi goroutine?
-- [ ] 根据redis源码的replication部分重写主从
-- [ ] redis replconfCommand
-
-- [ ] info replication
+- [x] info replication
 - [ ] AOF
-- [ ] master and slave
+- [x] master and slave
 - [ ] sentinel
 - [ ] cluster
 - [ ] expire key

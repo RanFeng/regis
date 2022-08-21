@@ -9,7 +9,6 @@ import (
 	log "code/regis/lib"
 	"code/regis/lib/utils"
 	"code/regis/redis"
-	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -57,39 +56,30 @@ func (cli *RegisClient) Close() {
 }
 
 // Recv 暂时先不处理错误，反正这是假client
-func (cli *RegisClient) Recv() base.Reply {
-	reader := bufio.NewReader(cli.Conn)
-	for {
-		msg, err := reader.ReadBytes('\n')
-		if err != nil {
-			log.Error("client err %v", err)
-			cli.Close()
-			return redis.NilReply
-		}
-		switch msg[0] {
-		case redis.PrefixErr[0]:
-			log.Error("%v", string(msg[:len(msg)-2]))
-		case redis.PrefixStr[0], redis.PrefixInt[0]:
-			log.Debug("%v", string(msg[:len(msg)-2]))
-		case redis.PrefixArray[0], redis.PrefixBulk[0]:
-			log.Debug("bluk or array")
-		default:
-			log.Debug("len: %v, msg: %v", len(msg), msg)
-		}
-	}
-}
+//func (cli *RegisClient) Recv() base.Reply {
+//	reader := bufio.NewReader(cli.Conn)
+//	for {
+//		msg, err := reader.ReadBytes('\n')
+//		if err != nil {
+//			log.Error("client err %v", err)
+//			cli.Close()
+//			return redis.NilReply
+//		}
+//		switch msg[0] {
+//		case redis.PrefixErr[0]:
+//			log.Error("%v", string(msg[:len(msg)-2]))
+//		case redis.PrefixStr[0], redis.PrefixInt[0]:
+//			log.Debug("%v", string(msg[:len(msg)-2]))
+//		case redis.PrefixArray[0], redis.PrefixBulk[0]:
+//			log.Debug("bluk or array")
+//		default:
+//			log.Debug("len: %v, msg: %v", len(msg), msg)
+//		}
+//	}
+//}
 
 func (cli *RegisClient) GetReply() base.Reply {
 	return redis.Parse2Reply(cli.Conn)
-}
-
-func (cli *RegisClient) RecvN(buf []byte) (n int, err error) {
-	return io.ReadAtLeast(cli.Conn, buf, 1)
-}
-
-func (cli *RegisClient) RecvAll() (buf []byte, err error) {
-	//io.ReadAtLeast()
-	return io.ReadAll(cli.Conn)
 }
 
 // PartSync 自己是slave，从远端master 增量同步到自己
@@ -122,12 +112,14 @@ func (cli *RegisClient) FullSync(offset int64) {
 	// 先传递一个$509\r\n，其中509表示rdb大小
 	reader := bufio.NewReader(cli.Conn)
 	msg, err := reader.ReadBytes('\n')
-	log.Info("read msg %v", utils.BytesViz(msg))
+	//msg, err := cli.Conn.Read('\n')
+	log.Info("read msg %v %v", utils.BytesViz(msg), err)
 	if err != nil {
 		return
 	}
 	rdbSize, err := strconv.ParseInt(string(msg[1:len(msg)-2]), 10, 64)
 	if err != nil {
+		log.Error("can not parseInt, %v", err)
 		return
 	}
 	err = file.SaveFile(conf.Conf.RDBName, reader, int(rdbSize))
@@ -154,57 +146,11 @@ func (cli *RegisClient) FullSync(offset int64) {
 	if !Server.ReplBacklog.Active {
 		Server.ReplBacklog.Active = true
 	}
+	Server.MasterReplOffset = offset
 	Server.Replid2 = strings.Repeat("0", base.ConfigRunIDSize)
 	Server.SlaveState = base.ReplStateConnected
 	cli.PartSync()
 }
-
-// PSync 自己是slave，要拉远端master同步
-//func (cli *RegisClient) PSync() {
-//	//log.Notice("MASTER <-> REPLICA sync started")
-//	//cli.Send(redis.CmdReply("ping")) // TODO 此处发出的ping会被master认为是master的master发来的
-//	//if !redis.Equal(cli.GetReply(), redis.StrReply("PONG")) {
-//	//	return
-//	//}
-//	cli.Send(redis.CmdReply("REPLCONF", "listening-port", conf.Conf.Port))
-//	if !redis.Equal(cli.GetReply(), redis.OkReply) {
-//		return
-//	}
-//	cli.Send(redis.CmdReply("REPLCONF", "capa", "PSYNC"))
-//	if !redis.Equal(cli.GetReply(), redis.OkReply) {
-//		return
-//	}
-//	//if Server.Master == nil {
-//	//	cli.Send(redis.CmdReply("PSYNC", "?", -1))
-//	//} else {
-//	log.Notice("Trying a partial resynchronization (request %v:%v).",
-//		Server.Replid, Server.MasterReplOffset+1)
-//	cli.Send(redis.CmdReply("PSYNC", Server.Replid, Server.MasterReplOffset+1))
-//	//}
-//	reply := redis.GetString(cli.GetReply())
-//	log.Info("get master reply, %v", reply)
-//	syncInfo := strings.Split(reply, " ")
-//	if len(syncInfo) == 3 { // 是 full sync
-//		tag := strings.ToUpper(syncInfo[0])
-//		switch tag {
-//		case "FULLRESYNC":
-//			offset, err := strconv.ParseInt(syncInfo[2], 10, 64)
-//			if err != nil {
-//				log.Error("get syncInfo offset fail, err %v", syncInfo)
-//			}
-//			if offset < 0 {
-//				offset = 0
-//			}
-//			cli.FullSync(syncInfo[1], offset)
-//		}
-//	}
-//
-//	go cli.PartSync()
-//	Server.Master = cli
-//	cli.LastBeat = time.Now()
-//	Server.ReplBacklog.Active = true
-//	log.Info("slave to %v %v %v", Server.Replid, cli.RemoteAddr(), Server.MasterReplOffset)
-//}
 
 func NewClient(addr string) (*RegisClient, error) {
 	conn, err := net.Dial("tcp", addr)

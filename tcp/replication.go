@@ -34,6 +34,8 @@ func ReplicationFeedSlaves(msg []byte, dbIndex int) {
 		return
 	}
 
+	//log.Debug("hhhhhh %v %v %v", utils.BytesViz(msg), Server.SlaveDBIndex, dbIndex)
+
 	// 如果写命令的db改了，要使用select改一下
 	selectCMD := []byte{}
 	if Server.SlaveDBIndex != dbIndex {
@@ -54,18 +56,6 @@ func ReplicationFeedSlaves(msg []byte, dbIndex int) {
 	// master复制偏移增加
 	Server.MasterReplOffset += appendNum
 
-	// 再往slave同步
-	//for k := range Server.Slave {
-	//	// 对于在等待rdb的那部分slave，现在不同步
-	//	if Server.Slave[k].State != base.SlaveStateOnline {
-	//		continue
-	//	}
-	//
-	//	if len(selectCMD) > 0 {
-	//		_ = Server.Slave[k].Write(selectCMD)
-	//	}
-	//	_ = Server.Slave[k].Write(msg)
-	//}
 }
 
 // ReplicationFeedSlavesFromMasterStream
@@ -87,19 +77,18 @@ func ReplicationFeedSlavesFromMasterStream() {
 
 // UnsetMaster 设置自己为master
 func UnsetMaster() {
-
 	// 如果自己是master，直接返回
-	if Server.Master == nil {
-		return
+	if Server.Master != nil {
+		// 关闭master
+		Server.Master.Close()
+		Server.Master = nil
+		Server.MasterAddr = ""
 	}
-
-	// 关闭master
-	Server.Master.Close()
-	Server.Master = nil
 
 	// 切换自己的offset和replid
 	Server.MasterReplOffset2 = Server.MasterReplOffset
-	//Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
+	Server.Replid2 = Server.Replid
+	Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
 
 	// 断开所有的slave，让他们重新获取新的replid
 	freeAllSlaves()
@@ -110,8 +99,7 @@ func UnsetMaster() {
 }
 
 func syncWithMaster() {
-	if Server.SlaveState == base.ReplStateNone {
-		Server.Master.Close()
+	if Server.SlaveState >= base.ReplStateConnected || Server.SlaveState <= base.ReplStateConnect {
 		return
 	}
 
@@ -155,6 +143,7 @@ func syncWithMaster() {
 	// 会收到是continue还是fullresync
 	if Server.SlaveState == base.ReplStateReceivePSync {
 		reply := redis.GetInline(Server.Master.GetReply())
+		log.Notice("get psync reply %v", reply)
 		switch strings.ToUpper(reply[0]) {
 		case "FULLRESYNC":
 			if len(reply) != 3 {
@@ -189,6 +178,9 @@ func syncWithMaster() {
 			log.Notice("MASTER <-> REPLICA sync: Master accepted a Partial Resynchronization.")
 			Server.SlaveState = base.ReplStateConnected
 			go Server.Master.PartSync()
+		default:
+			log.Error("master is a slave and not connected! %v", reply)
+			Server.SlaveState = base.ReplStateSendPSync
 		}
 	}
 }
@@ -251,7 +243,6 @@ func ReplicationCron() {
 	// master
 
 	// 作为master，定期向slave发送ping包
-	//log.Debug("hhhhhh %v %v", replicationCronLoops, Server.ReplPingSlavePeriod)
 	if replicationCronLoops%Server.ReplPingSlavePeriod == 0 {
 		HeartBeatToSlave()
 	}
@@ -337,9 +328,10 @@ func ReplicationCron() {
 			log.Notice("MASTER <-> REPLICA sync started")
 			Server.Master.LastBeat = time.Now()
 			Server.SlaveState = base.ReplStateConnecting
-			syncWithMaster()
 		}
 	}
+
+	syncWithMaster()
 
 	// 定期向master发送ack
 	if Server.SlaveState == base.ReplStateConnected {

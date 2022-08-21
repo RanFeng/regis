@@ -155,6 +155,7 @@ func Parse2Reply(conn io.Reader) base.Reply {
 			log.Error("bulk is null %v", utils.BytesViz(msg))
 			return NilReply
 		}
+		//log.Debug("bulk len %v", bulkLen)
 		buf := make([]byte, bulkLen)
 		_, err = io.ReadFull(r, buf)
 		if err != nil {
@@ -184,6 +185,9 @@ func Parse2Reply(conn io.Reader) base.Reply {
 		}
 		return IntReply(int(v))
 	default:
+		if len(msg) == 1 {
+			return nil
+		}
 		ret := strings.Split(string(msg[:len(msg)-2]), " ")
 		if len(ret) > 0 {
 			return CmdSReply(ret...)

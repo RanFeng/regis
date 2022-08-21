@@ -151,8 +151,8 @@ func ReplicaOf(conn *tcp.RegisConn, args []string) base.Reply {
 	if tcp.Server.Master != nil && tcp.Server.Master.RemoteAddr() == addr {
 		return redis.StrReply("OK Already connected to specified master")
 	}
-	tcp.UnsetMaster()
 	tcp.Server.MasterAddr = addr
+	tcp.UnsetMaster()
 	tcp.Server.SlaveState = base.ReplStateConnect
 	// 在这里还不直接去连接master，接下来要交给CronJob去连接
 	// 因为使用CronJob就会自带retry属性了
@@ -228,6 +228,12 @@ func ReplConf(conn *tcp.RegisConn, args []string) base.Reply {
 
 // PSync 自己是master，给slave进行同步
 func PSync(conn *tcp.RegisConn, args []string) base.Reply {
+
+	//log.Info("me slave state %v %v", args, tcp.Server.SlaveState)
+	if (tcp.Server.MasterAddr != "" || tcp.Server.Master != nil) && tcp.Server.SlaveState != base.ReplStateConnected {
+		return redis.ErrReply("NOMASTERLINK Can't SYNC while not connected with my master")
+	}
+
 	offset, err := strconv.ParseInt(args[2], 10, 64)
 	if err != nil {
 		// 此处不应该出错，试试直接全量同步
@@ -235,17 +241,19 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 	}
 
 	// 如果传过来是个 PSYNC id offset， 如果不是本机 Replid 也不是本机 Replid2，或者超出了本机 MasterReplOffset2，都得全量
-	if args[1] != tcp.Server.Replid || (args[1] == tcp.Server.Replid2 && offset > tcp.Server.MasterReplOffset2) {
+	// 既不等于Replid ，也不等于 Replid2 全量
+	if args[1] != tcp.Server.Replid && args[1] != tcp.Server.Replid2 {
 		goto fullSync
 	}
 
 	// 本机offset过多，被刷掉了，或者本机是个slave，只有部分的back log，不足以支持部分同步
 	if tcp.Server.ReplBacklog == nil ||
 		!tcp.Server.ReplBacklog.Active ||
-		tcp.Server.ReplBacklog.Readable(offset) != nil {
+		tcp.Server.ReplBacklog.Readable(offset-1) != nil {
 		goto fullSync
 	}
 
+	log.Notice("Part resync requested by replica %v %v", conn.RemoteAddr(), offset-1)
 	// 好了，至此应该可以开始部分同步了
 	conn.LastBeat = time.Now()
 	conn.State = base.SlaveStateOnline
@@ -258,13 +266,13 @@ func PSync(conn *tcp.RegisConn, args []string) base.Reply {
 	}
 
 	// 开始真正的部分同步
-	if tcp.Server.ReplBacklog.Active {
-		// 部分同步
-		log.Info("try partial sync %v", offset-1)
-		bs, _ := tcp.Server.ReplBacklog.Read(offset - 1)
-		log.Info("I'm sending %v !!", utils.BytesViz(bs))
-		_ = conn.Write(bs)
-	}
+	//if tcp.Server.ReplBacklog.Active {
+	//	// 部分同步
+	//	log.Info("try partial sync %v", offset-1)
+	//	bs, _ := tcp.Server.ReplBacklog.Read(offset - 1)
+	//	log.Info("I'm sending %v !!", utils.BytesViz(bs))
+	//	_ = conn.Write(bs)
+	//}
 	return nil
 
 fullSync:
@@ -275,18 +283,15 @@ fullSync:
 	tcp.Server.Slave[conn.ID] = conn
 
 	// 如果我们从一个独立的机器变成master，要做一些初始化
-	if len(tcp.Server.Slave) == 1 {
+	if tcp.Server.Master == nil && tcp.Server.ReplBacklog == nil && len(tcp.Server.Slave) == 1 {
 		// 老id过期了，刷新Replid以及Replid2
 		tcp.Server.Replid = utils.GetRandomHexChars(base.ConfigRunIDSize)
 		tcp.Server.Replid2 = strings.Repeat("0", base.ConfigRunIDSize)
 
 		tcp.Server.MasterReplOffset2 = -1
 
-		if tcp.Server.ReplBacklog == nil {
-			tcp.Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
-			tcp.Server.ReplBacklog.Active = true
-			tcp.Server.ReplBacklog.WritePtr = offset - 1 // redis这里是+1，regis这里直接置为offset - 1
-		}
+		tcp.Server.ReplBacklog = ds.NewRingBuffer(conf.Conf.ReplBacklogSize)
+		tcp.Server.ReplBacklog.Active = true
 	}
 
 	if tcp.Server.DB.GetStatus() == base.WorldFrozen && tcp.Server.LastBGSaveOffset >= 0 {

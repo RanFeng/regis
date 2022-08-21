@@ -155,7 +155,6 @@ func SaveRDB() error {
 	if err != nil {
 		log.Error("save RDB error %v", err)
 		Server.LastBGSaveOffset = -1
-		// TODO bgsave出错，断开所有在 base.SlaveStateNeedBGSave 的slave
 		waits := make([]int64, 0, len(Server.Slave))
 		for s := range Server.Slave {
 			if Server.Slave[s].State <= base.SlaveStateWaitBGSaveEnd {
@@ -186,22 +185,21 @@ func (s *RegisServer) GetWorkChan() <-chan *Command {
 }
 
 func (s *RegisServer) GetInfo() string {
-	serverInfo := `# RegisServer
-tcp_port:%s
-run_id:%s
-role:%s
-connected_slaves:%d
-master_repl_offset:%d
-repl_backlog_active:%v
-repl_backlog_size:%d
-repl_backlog_first_byte_offset:%v
-repl_backlog_histlen:%v
-`
+	serverInfo := ""
 	port := strings.Split(s.Address, ":")[1]
 	serverInfo += fmt.Sprintf("tcp_port:%v\n", port)
-	serverInfo += fmt.Sprintf("run_id:%v\n", s.Replid)
+	serverInfo += fmt.Sprintf("replid:%v\n", s.Replid)
+	serverInfo += fmt.Sprintf("master_offset:%v\n", s.MasterReplOffset)
+	serverInfo += fmt.Sprintf("replid2:%v\n", s.Replid2)
+	serverInfo += fmt.Sprintf("master_offset2:%v\n", s.MasterReplOffset2)
 	serverInfo += fmt.Sprintf("role:%v\n", utils.IF(s.Master == nil, "master", "slave"))
 	serverInfo += fmt.Sprintf("connected_slaves:%v\n", len(s.Slave))
+	if len(s.Slave) > 0 {
+		for _, slave := range s.Slave {
+			serverInfo += fmt.Sprintf(" (id: %v, state: %v, ack_offset: %v, db_index: %v, last_beat: %v)\n",
+				slave.ID, slave.State, slave.AckOffset, slave.DBIndex, time.Since(slave.LastBeat))
+		}
+	}
 	serverInfo += fmt.Sprintf("master_repl_offset:%v\n", s.MasterReplOffset)
 	serverInfo += fmt.Sprintf("repl_backlog_active:%v\n", s.ReplBacklog != nil && s.ReplBacklog.Active)
 	if s.ReplBacklog != nil {

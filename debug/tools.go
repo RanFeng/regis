@@ -6,6 +6,7 @@ import (
 	log "code/regis/lib"
 	"code/regis/redis"
 	"code/regis/tcp"
+	"io"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func (d *Debugger) CmdReply(want base.Reply, cmd ...interface{}) {
 	d.Cli.Send(redis.CmdReply(cmd))
 	wb := want.Bytes()
 	buf := make([]byte, len(wb))
-	num, err := d.Cli.RecvN(buf)
+	num, err := io.ReadAtLeast(d.Cli.Conn, buf, 1)
 
 	if err != nil {
 		d.T.Errorf("err %v", err)
@@ -43,7 +44,7 @@ func (d *Debugger) CmdReply_(want base.Reply, cmd ...interface{}) {
 	d.Cli.Send(redis.CmdReply(cmd))
 	wb := want.Bytes()
 
-	buf, err := d.Cli.RecvAll()
+	buf, err := io.ReadAll(d.Cli.Conn)
 
 	if err != nil {
 		d.T.Errorf("err %v", err)
